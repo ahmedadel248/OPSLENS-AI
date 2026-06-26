@@ -1,0 +1,18 @@
+# tensorflow==2.16.2
+numpy==1.26.4
+pandas==2.2.3
+scikit-learn==1.5.2
+joblib==1.4.2
+openpyxl==3.1.5
+
+kubernetes==31.0.0
+PyYAML==6.0.2
+
+fastapi==0.115.6
+uvicorn==0.32.1
+pydantic==2.10.4
+python-dotenv==1.0.1
+requests==2.32.3
+
+tqdm==4.67.1
+rich==13.9.4

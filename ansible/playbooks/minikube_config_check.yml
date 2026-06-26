@@ -1,0 +1,59 @@
+- name: Minikube Config Health Check via Windows minikube ssh
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: Get disk usage raw
+      shell: powershell.exe -NoProfile -Command "minikube ssh -- df -h /"
+      register: disk_usage_raw
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Get memory usage raw
+      shell: powershell.exe -NoProfile -Command "minikube ssh -- free -m"
+      register: memory_usage_raw
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Get load average raw
+      shell: powershell.exe -NoProfile -Command "minikube ssh -- cat /proc/loadavg"
+      register: load_average_raw
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check kubelet status
+      shell: powershell.exe -NoProfile -Command "minikube ssh -- systemctl is-active kubelet"
+      register: kubelet_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check containerd status
+      shell: powershell.exe -NoProfile -Command "minikube ssh -- systemctl is-active containerd"
+      register: containerd_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check docker status
+      shell: powershell.exe -NoProfile -Command "minikube ssh -- systemctl is-active docker"
+      register: docker_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Check firewall status
+      shell: powershell.exe -NoProfile -Command "minikube ssh -- systemctl is-active firewalld"
+      register: firewall_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Output JSON Result
+      debug:
+        msg:
+          node_name: "minikube"
+          disk_usage: "{{ disk_usage_raw.stdout_lines[-1].split()[4] if disk_usage_raw.stdout_lines | length > 1 else 'unknown' }}"
+          memory_usage: "{{ memory_usage_raw.stdout_lines[1].split()[2] ~ '/' ~ memory_usage_raw.stdout_lines[1].split()[1] ~ ' MB' if memory_usage_raw.stdout_lines | length > 1 else 'unknown' }}"
+          memory_usage_percent: "{{ '%.2f' | format(((memory_usage_raw.stdout_lines[1].split()[2] | float) / (memory_usage_raw.stdout_lines[1].split()[1] | float)) * 100) if memory_usage_raw.stdout_lines | length > 1 else 'unknown' }}"
+          load_average: "{{ load_average_raw.stdout.split()[0] ~ ',' ~ load_average_raw.stdout.split()[1] ~ ',' ~ load_average_raw.stdout.split()[2] if load_average_raw.stdout else 'unknown' }}"
+          kubelet_status: "{{ kubelet_status.stdout | default('unknown') | trim }}"
+          containerd_status: "{{ containerd_status.stdout | default('unknown') | trim }}"
+          docker_status: "{{ docker_status.stdout | default('unknown') | trim }}"
+          firewall_status: "{{ firewall_status.stdout | default('unknown') | trim }}"

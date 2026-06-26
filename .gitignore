@@ -1,0 +1,60 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Secrets / environment
+.env
+*.env
+secrets/
+*.pem
+*_key*
+*.key
+
+# Runtime data
+data/*.jsonl
+
+data/incident_reports/*
+!data/incident_reports/.gitkeep
+
+data/final_incident_reports/*
+!data/final_incident_reports/.gitkeep
+
+data/live/*
+!data/live/.gitkeep
+
+data/processed/*
+!data/processed/.gitkeep
+
+data/raw/*
+!data/raw/.gitkeep
+
+# Generated reports / exports
+reports/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Old / heavy folders should not return
+Data&Model/
+team_integration/
+wheels/
+
+# Local temp listings
+project_tree.txt
+project_files_clean.txt
+project_core_files.txt
+
+# Keep model runtime files in artifacts.
+# Do not ignore artifacts/resource_detector_v7_egypt_timeaware/

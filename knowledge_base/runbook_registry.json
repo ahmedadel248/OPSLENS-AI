@@ -1,0 +1,17 @@
+﻿{
+  "ServiceTargetPortMismatch": "service_targetport_mismatch.md",
+  "ServiceSelectorMismatch": "service_targetport_mismatch.md",
+  "EmptyServiceEndpoints": "service_targetport_mismatch.md",
+
+  "ConnectionRefused": "connection_refused.md",
+
+  "Unhealthy": "readiness_probe_failed.md",
+  "KubernetesWarningEvent": "readiness_probe_failed.md",
+
+  "DeploymentNoAvailableReplicas": "deployment_no_available_replicas.md",
+
+  "cpu_anomaly": "cpu_memory_anomaly.md",
+  "memory_anomaly": "cpu_memory_anomaly.md",
+  "cpu_memory_anomaly": "cpu_memory_anomaly.md",
+  "resource_anomaly": "cpu_memory_anomaly.md"
+}

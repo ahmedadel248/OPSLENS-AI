@@ -1,0 +1,50 @@
+{
+    "model_type": "v7_segmented_egypt_timeaware_multi_head_lstm",
+    "target_domain": "minikube",
+    "source_domain": "vm-node_temporal_patterns",
+    "dataset": "minikube_segmented_20000_v7_egypt_timeaware.csv",
+    "timezone": "Africa/Cairo",
+    "window_size": 20,
+    "sampling_interval_seconds": 30,
+    "features": [
+        "cpu_usage",
+        "memory_usage",
+        "hour_sin",
+        "hour_cos"
+    ],
+    "targets": [
+        "cpu_usage",
+        "memory_usage"
+    ],
+    "outputs": {
+        "cpu": "cpu_output",
+        "memory": "memory_output"
+    },
+    "thresholds": {
+        "cpu_error_threshold": 0.1336273424293687,
+        "memory_error_threshold": 0.07642046739858067
+    },
+    "pressure_thresholds": {
+        "cpu_pressure_threshold": 0.85,
+        "memory_pressure_threshold": 0.85
+    },
+    "decision_logic": {
+        "cpu_pattern_anomaly": "cpu_positive_error > cpu_error_threshold",
+        "memory_pattern_anomaly": "memory_positive_error > memory_error_threshold",
+        "cpu_pressure_anomaly": "actual_cpu >= cpu_pressure_threshold",
+        "memory_pressure_anomaly": "actual_memory >= memory_pressure_threshold",
+        "cpu_anomaly": "cpu_pattern_anomaly OR cpu_pressure_anomaly",
+        "memory_anomaly": "memory_pattern_anomaly OR memory_pressure_anomaly",
+        "resource_anomaly": "cpu_anomaly OR memory_anomaly"
+    },
+    "training_policy": "trained_on_normal_segments_only",
+    "anomaly_usage": "evaluation_only",
+    "evaluation": {
+        "normal_test_detection_rate": 0.0095151789759855,
+        "normal_test_cpu_anomaly_rate": 0.0018124150430448573,
+        "normal_test_memory_anomaly_rate": 0.007702763932940644,
+        "anomaly_test_detection_rate": 1.0,
+        "anomaly_test_cpu_anomaly_rate": 0.5492424242424242,
+        "anomaly_test_memory_anomaly_rate": 0.5265151515151515
+    }
+}
