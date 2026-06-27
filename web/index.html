@@ -1,0 +1,255 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpsLens AI</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">O</div>
+        <div>
+          <h1>OpsLens AI</h1>
+          <p>Kubernetes Incident Investigation</p>
+        </div>
+      </div>
+
+      <nav class="side-nav">
+        <button class="nav-btn active" data-view="dashboardView">Dashboard</button>
+        <button class="nav-btn" data-view="newInvestigationView">New Investigation</button>
+        <button class="nav-btn" data-view="pipelineView">Live Pipeline</button>
+        <button class="nav-btn" data-view="reportView">Report Details</button>
+        <button class="nav-btn" data-view="settingsView">Settings</button>
+      </nav>
+
+      <section class="panel mini-panel">
+        <h2>Runtime</h2>
+        <div id="apiStatus" class="api-status">Checking API...</div>
+        <div id="jobMiniStatus" class="api-status">No job yet</div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <section id="dashboardView" class="view">
+        <header class="hero">
+          <div>
+            <p class="eyebrow">AIOps Console</p>
+            <h2>OpsLens Dashboard</h2>
+            <p>
+              Start a scoped Kubernetes investigation, watch agents analyze evidence,
+              and export a human-readable incident report.
+            </p>
+          </div>
+
+          <div class="hero-card">
+            <span>Current Status</span>
+            <strong id="jobStatus">Idle</strong>
+            <small id="jobId">No job yet</small>
+          </div>
+        </header>
+
+        <section class="report-grid">
+          <div class="report-card">
+            <h3>Cluster Scope</h3>
+            <p id="clusterSummary">Loading cluster details...</p>
+          </div>
+
+          <div class="report-card">
+            <h3>Latest Investigation</h3>
+            <p id="latestSummary">No investigation has been completed in this session yet.</p>
+          </div>
+
+          <div class="report-card wide">
+            <h3>Recommended Flow</h3>
+            <div class="flow-list">
+              <span>1. Select node</span>
+              <span>2. Select relevant namespace</span>
+              <span>3. Apply scenario if needed</span>
+              <span>4. Run investigation</span>
+              <span>5. Review report</span>
+              <span>6. Export PDF / Excel</span>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="newInvestigationView" class="view hidden">
+        <header class="hero compact-hero">
+          <div>
+            <p class="eyebrow">New Investigation</p>
+            <h2>Investigation Setup</h2>
+            <p>Choose the node first. The namespace list will be filtered to namespaces with Pods on that node.</p>
+          </div>
+        </header>
+
+        <section class="panel form-panel">
+          <label>
+            Node
+            <select id="nodeSelect"></select>
+          </label>
+
+          <label>
+            Namespace
+            <div class="input-row">
+              <select id="namespaceSelect"></select>
+              <input id="namespaceInput" placeholder="or type namespace manually" />
+            </div>
+            <small class="hint">Namespaces shown here are filtered by Pods scheduled on the selected node.</small>
+          </label>
+
+          <label>
+            Scenario
+            <select id="scenarioSelect">
+              <option value="">No scenario</option>
+            </select>
+          </label>
+
+          <div class="checks">
+            <label class="check">
+              <input type="checkbox" id="applyScenario" checked />
+              Apply selected scenario
+            </label>
+
+            <label class="check danger">
+              <input type="checkbox" id="resetNamespace" />
+              Reset namespace first
+            </label>
+
+            <label class="check">
+              <input type="checkbox" id="demoMetrics" checked />
+              Demo metrics anomaly
+            </label>
+          </div>
+
+          <label>
+            Wait after scenario apply
+            <input id="waitSeconds" type="number" min="0" max="180" value="45" />
+          </label>
+
+          <button id="runBtn" class="primary-btn">Run Investigation</button>
+        </section>
+      </section>
+
+      <section id="pipelineView" class="view hidden">
+        <header class="hero compact-hero">
+          <div>
+            <p class="eyebrow">Live Pipeline</p>
+            <h2>Agent Execution</h2>
+            <p id="pipelineHint">Waiting for investigation.</p>
+          </div>
+        </header>
+
+        <section class="pipeline-card">
+          <div id="pipeline" class="pipeline"></div>
+        </section>
+      </section>
+
+      <section id="reportView" class="view hidden">
+        <header class="hero compact-hero">
+          <div>
+            <p class="eyebrow">Report Details</p>
+            <h2 id="reportTitle">No report yet</h2>
+            <p>Review the final RCA, additional findings, safe commands, and verification plan.</p>
+          </div>
+
+          <div class="hero-card">
+            <span>Export</span>
+            <select id="downloadFormat">
+              <option value="pdf">PDF</option>
+              <option value="xlsx">Excel</option>
+              <option value="markdown">Markdown</option>
+              <option value="json">JSON</option>
+            </select>
+            <button id="downloadReportBtn" class="secondary-btn">Download</button>
+          </div>
+        </header>
+
+        <section id="reportSection" class="report-grid hidden">
+          <div class="report-card overview">
+            <div class="badges">
+              <span id="severityBadge" class="badge">severity</span>
+              <span id="confidenceBadge" class="badge">confidence</span>
+            </div>
+            <h3>Incident Summary</h3>
+            <p id="incidentSummary"></p>
+          </div>
+
+          <div class="report-card wide">
+            <h3>Primary Root Cause</h3>
+            <p id="rootCause"></p>
+          </div>
+
+          <div class="report-card">
+            <h3>Evidence Trail</h3>
+            <div id="evidenceTrail" class="table-wrap"></div>
+          </div>
+
+          <div class="report-card">
+            <h3>Additional Findings</h3>
+            <div id="additionalFindings" class="table-wrap"></div>
+          </div>
+
+          <div class="report-card wide">
+            <h3>Recommended Fix</h3>
+            <p id="fixStrategy"></p>
+            <div id="actions"></div>
+          </div>
+
+          <div class="report-card wide">
+            <h3>Safe Commands</h3>
+            <div id="commands"></div>
+          </div>
+
+          <div class="report-card wide">
+            <h3>Verification Plan</h3>
+            <p id="verificationIntent"></p>
+            <div id="verificationCommands"></div>
+          </div>
+        </section>
+
+        <section id="emptyState" class="empty-state">
+          <div class="orb"></div>
+          <h3>No report yet</h3>
+          <p>Run an investigation first, then the report will appear here.</p>
+        </section>
+      </section>
+
+      <section id="settingsView" class="view hidden">
+        <header class="hero compact-hero">
+          <div>
+            <p class="eyebrow">Settings</p>
+            <h2>Runtime Settings</h2>
+            <p>Current V1 safety settings for local investigation runs.</p>
+          </div>
+        </header>
+
+        <section class="report-grid">
+          <div class="report-card">
+            <h3>Safety Mode</h3>
+            <p>OpsLens recommends safe commands only. It does not execute remediation commands automatically from the UI.</p>
+          </div>
+
+          <div class="report-card">
+            <h3>Protected Namespaces</h3>
+            <p>default, kube-system, kube-public, kube-node-lease cannot be reset from the UI.</p>
+          </div>
+
+          <div class="report-card wide">
+            <h3>Future Auto-Scope Mode</h3>
+            <p>
+              In the next version, the user can open OpsLens from an affected app/pod.
+              OpsLens will infer namespace, node, workload, and service automatically from that launch context.
+            </p>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,4 +1,6 @@
-﻿import json
+﻿from __future__ import annotations
+
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -6,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.core.root_cause_facts import build_root_cause_facts
+from src.core.k8s_selector_facts import enrich_service_selector_facts
 from src.knowledge.runbook_retriever import RuleBasedRunbookRetriever
 
 
@@ -21,8 +24,9 @@ class GeminiReasoningAgent:
 
     Python is responsible for:
     - Safety validation
+    - Separating primary incident from additional findings
     - Preventing hallucinated resources
-    - Converting safe LLM actions into executable commands only when facts are complete
+    - Rendering safe commands only when facts are complete
     """
 
     def __init__(
@@ -43,6 +47,17 @@ class GeminiReasoningAgent:
     def analyze(self, supervisor_report: Dict[str, Any]) -> Dict[str, Any]:
         supervisor_report = dict(supervisor_report)
         supervisor_report["root_cause_facts"] = supervisor_report.get("root_cause_facts") or build_root_cause_facts(supervisor_report)
+
+        affected = supervisor_report.get("affected_resources") or {}
+        facts = supervisor_report.get("root_cause_facts") or {}
+        namespace = facts.get("namespace") or affected.get("namespace") or affected.get("namespace_name")
+        service = facts.get("service_name") or affected.get("service") or affected.get("service_name")
+
+        supervisor_report["root_cause_facts"] = enrich_service_selector_facts(
+            facts=facts,
+            namespace=namespace,
+            service_name=service,
+        )
 
         runbooks = self.retriever.retrieve(supervisor_report)
         compact_input = self._compact_supervisor_report(supervisor_report, runbooks)
@@ -136,8 +151,8 @@ class GeminiReasoningAgent:
             system_instruction=self._system_instruction(),
             response_mime_type="application/json",
             response_schema=self._schema(),
-            temperature=0.2,
-            max_output_tokens=1800,
+            temperature=0.15,
+            max_output_tokens=2200,
         )
 
         try:
@@ -153,8 +168,8 @@ class GeminiReasoningAgent:
                 config=types.GenerateContentConfig(
                     system_instruction=self._system_instruction(),
                     response_mime_type="application/json",
-                    temperature=0.2,
-                    max_output_tokens=1800,
+                    temperature=0.15,
+                    max_output_tokens=2200,
                 ),
             )
 
@@ -166,24 +181,33 @@ class GeminiReasoningAgent:
         return f"""
 Create the final OpsLens incident report from the structured input below.
 
+Important:
+- Identify the PRIMARY incident first.
+- Then list ADDITIONAL findings separately.
+- Do not merge unrelated worker failures into the root-cause chain of a Service issue.
+- A Service with empty endpoints can be caused by a selector mismatch even when unrelated pods are failing elsewhere.
+- ImagePullBackOff and CrashLoopBackOff are additional findings unless the affected Service actually selects those pods.
+- Metrics anomalies are operational context unless selected as the primary root cause.
+
 You must produce:
-1. incident summary
-2. root cause story
-3. recommended fix strategy
-4. recommended actions
-5. verification intent
+1. title
+2. incident summary
+3. primary root cause story
+4. additional findings in scope
+5. prioritized recommended actions
+6. verification intent
 
 Recommended actions must be logical actions, not raw commands.
 
-For ServiceTargetPortMismatch, if facts are complete, include this action:
-- action_type: align_service_target_port
-- target_kind: service_and_deployment
-- reason: explain why targetPort and readinessProbe must match containerPort
+For ServiceSelectorMismatch or EmptyServiceEndpoints:
+- action_type: align_service_selector
+- target_kind: service
+- reason: explain that Service selector must match intended backend Pod labels
 - risk: low
 
-If the incident is unknown or no runbook is available:
-- Still produce a remediation or investigation strategy from Supervisor facts.
-- Use action_type: investigate_further when safe remediation is not certain.
+For unrelated ImagePullBackOff or CrashLoopBackOff:
+- action_type: investigate_further
+- mark as follow-up, not primary remediation
 
 Return JSON only.
 
@@ -209,6 +233,18 @@ Structured input:
                 },
                 "incident_summary": {"type": "string"},
                 "root_cause_story": {"type": "string"},
+                "additional_findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "resource": {"type": "string"},
+                            "finding": {"type": "string"},
+                            "impact": {"type": "string"},
+                            "priority": {"type": "string"},
+                        },
+                    },
+                },
                 "recommended_fix": {
                     "type": "object",
                     "properties": {
@@ -278,13 +314,15 @@ Structured input:
         facts = supervisor_report.get("root_cause_facts") or build_root_cause_facts(supervisor_report)
         affected = supervisor_report.get("affected_resources") or {}
         primary = supervisor_report.get("primary_signal") or {}
+        supporting_raw = supervisor_report.get("supporting_signals", []) or []
 
         supporting = []
 
-        for signal in supervisor_report.get("supporting_signals", []) or []:
+        for signal in supporting_raw:
             supporting.append(
                 {
                     "source_agent": signal.get("source_agent"),
+                    "agent": self._canonical_agent_name(signal.get("source_agent"), signal.get("anomaly_type")),
                     "anomaly_type": signal.get("anomaly_type"),
                     "severity": signal.get("severity"),
                     "summary": signal.get("summary"),
@@ -293,17 +331,24 @@ Structured input:
                     "service_name": signal.get("service_name"),
                     "deployment_name": signal.get("deployment_name"),
                     "pod_name": signal.get("pod_name"),
+                    "container_name": signal.get("container_name"),
                 }
             )
 
         important_evidence = []
         keep_keywords = [
-            "service_port",
-            "target_port",
-            "available_container_ports",
+            "selector",
+            "endpoints",
+            "Endpoint",
+            "ServiceSelectorMismatch",
+            "EmptyEndpoints",
+            "EmptyServiceEndpoints",
             "ConnectionRefused",
-            "Unhealthy",
-            "DeploymentNoAvailableReplicas",
+            "ErrImagePull",
+            "ImagePullBackOff",
+            "CrashLoopBackOff",
+            "BackOff",
+            "DatabaseConnectionError",
             "Metrics context",
             "Primary signal",
             "Supporting signal",
@@ -314,7 +359,16 @@ Structured input:
             if any(keyword in text for keyword in keep_keywords):
                 important_evidence.append(text)
 
-        return {
+        primary_incident = {
+            "source_agent": primary.get("source_agent"),
+            "agent": self._canonical_agent_name(primary.get("source_agent"), primary.get("anomaly_type")),
+            "anomaly_type": primary.get("anomaly_type"),
+            "severity": primary.get("severity"),
+            "summary": primary.get("summary"),
+            "evidence": primary.get("evidence"),
+        }
+
+        compact = {
             "incident_title": supervisor_report.get("incident_title"),
             "severity": supervisor_report.get("severity"),
             "confidence": supervisor_report.get("confidence"),
@@ -324,44 +378,72 @@ Structured input:
                 "deployment": facts.get("deployment_name") or affected.get("deployment") or affected.get("deployment_name", ""),
                 "node": facts.get("node_name") or affected.get("node") or affected.get("node_name", ""),
             },
-            "primary_signal": {
-                "source_agent": primary.get("source_agent"),
-                "anomaly_type": primary.get("anomaly_type"),
-                "severity": primary.get("severity"),
-                "summary": primary.get("summary"),
-                "evidence": primary.get("evidence"),
-            },
+            "primary_incident": primary_incident,
+            "primary_signal": primary_incident,
             "root_cause_facts": facts,
-            "supporting_signals": supporting[:8],
-            "important_evidence": important_evidence[:12],
+            "supporting_signals": supporting[:12],
+            "additional_findings": [],
+            "important_evidence": important_evidence[:20],
             "retrieved_runbooks": [
                 {
                     "name": item["name"],
-                    "content_preview": item["content"][:1000],
+                    "content_preview": item["content"][:1200],
                 }
                 for item in runbooks
             ],
             "runbook_available": bool(runbooks),
             "constraints": [
                 "Use Supervisor facts as the source of truth.",
-                "Knowledge Base guidance is optional; if missing, still reason from facts.",
+                "Separate unrelated additional findings from the primary incident.",
                 "Do not invent resource names or ports.",
                 "Executable commands will be safety-validated outside the LLM.",
             ],
         }
+
+        compact["additional_findings"] = self._extract_additional_findings(compact)
+        return compact
 
     def _sanitize_report(self, report: Dict[str, Any], compact_input: Dict[str, Any]) -> Dict[str, Any]:
         report = dict(report)
 
         affected = compact_input.get("affected_resources") or {}
         facts = compact_input.get("root_cause_facts") or {}
+        root_type = facts.get("root_cause_type") or (compact_input.get("primary_signal") or {}).get("anomaly_type")
 
         namespace = affected.get("namespace", "default")
         service = affected.get("service", "")
         deployment = affected.get("deployment", "")
         node = affected.get("node", "")
 
-        report["title"] = report.get("title") or compact_input.get("incident_title") or "OpsLens Incident Report"
+        if root_type in {"ServiceSelectorMismatch", "EmptyServiceEndpoints", "EmptyEndpoints"}:
+            if "worker" in str(deployment).lower():
+                deployment = ""
+
+            service_display = service or "the affected Service"
+
+            report["title"] = f"ServiceSelectorMismatch detected on service {service_display}".strip()
+            report["incident_summary"] = (
+                f"OpsLens detected a primary service routing failure in namespace '{namespace}'. "
+                f"The Service '{service_display}' has no active endpoints because its selector does not match the labels of the intended backend Pods. "
+                "As a result, client traffic cannot be routed to the backend service. "
+                "Other failures were also detected in the same investigation scope and are listed separately as additional findings."
+            )
+            report["root_cause_story"] = (
+                f"The primary incident is an endpoint selection problem for '{service_display}'. "
+                "The backend workload may be running, but Kubernetes only attaches Pods to a Service when the Service selector matches Pod labels. "
+                "Because the selector does not match the intended backend Pods, the Service endpoint list remains empty. "
+                "Frontend/client requests to that Service therefore fail. "
+                "ImagePullBackOff and CrashLoopBackOff findings in other workloads are important follow-up issues, but they are not treated as the direct cause of this Service's empty endpoints unless evidence proves the Service selects those Pods."
+            )
+        else:
+            report["title"] = report.get("title") or compact_input.get("incident_title") or "OpsLens Incident Report"
+
+            if "incident_summary" not in report:
+                report["incident_summary"] = report.get("problem_description", "")
+
+            if "root_cause_story" not in report:
+                report["root_cause_story"] = report.get("root_cause_analysis", "")
+
         report["severity"] = report.get("severity") or compact_input.get("severity", "unknown")
         report["confidence"] = report.get("confidence") or compact_input.get("confidence", "medium")
         report["affected_resources"] = {
@@ -370,39 +452,35 @@ Structured input:
             "deployment": deployment,
             "node": node,
         }
+        report["root_cause_facts"] = facts
 
-        # Backward-compatible fields
-        if "incident_summary" not in report:
-            report["incident_summary"] = report.get("problem_description", "")
-
-        if "root_cause_story" not in report:
-            report["root_cause_story"] = report.get("root_cause_analysis", "")
-
-        report["root_cause_story"] = self._sanitize_root_cause_story(
-            report.get("root_cause_story", ""),
-            facts,
+        additional_findings = self._normalize_additional_findings(
+            report.get("additional_findings") or compact_input.get("additional_findings") or []
         )
 
         recommended_fix = report.get("recommended_fix") or {}
-        strategy = recommended_fix.get("strategy") or recommended_fix.get("explanation") or "Review the incident facts and apply the safest remediation strategy."
+        strategy = recommended_fix.get("strategy") or recommended_fix.get("explanation") or ""
 
-        actions = recommended_fix.get("actions") or []
-        actions = self._sanitize_actions(actions)
+        actions = self._sanitize_actions(recommended_fix.get("actions") or [])
 
-        operational_notes = self._extract_operational_notes(actions, facts)
-        actions = self._filter_primary_actions(actions, facts)
-
-        if not actions:
+        if root_type in {"ServiceSelectorMismatch", "EmptyServiceEndpoints", "EmptyEndpoints"}:
+            strategy = (
+                f"Fix the Service selector for '{service}' first so it matches the intended backend Pod labels. "
+                "Then verify that endpoints are populated and the frontend can reach the backend. "
+                "After the primary service routing issue is fixed, investigate the additional worker failures separately."
+            )
             actions = [
                 {
-                    "action_type": "investigate_further",
-                    "target_kind": "cluster_resource",
-                    "reason": "No safe remediation action was produced from the available facts.",
+                    "action_type": "align_service_selector",
+                    "target_kind": "service",
+                    "reason": "The Service selector must match the intended backend Pod labels so Kubernetes can populate endpoints.",
                     "risk": "low",
                 }
             ]
 
-        safe_commands = self._commands_from_actions(
+        operational_notes = self._extract_operational_notes(actions, facts)
+
+        commands = self._commands_from_actions(
             actions=actions,
             namespace=namespace,
             service=service,
@@ -410,15 +488,15 @@ Structured input:
             facts=facts,
         )
 
-        if not safe_commands:
-            safe_commands = self._safe_investigation_commands(namespace, service, deployment)
+        if not commands:
+            commands = self._safe_investigation_commands(namespace, service, deployment)
 
+        report["additional_findings"] = additional_findings
         report["operational_notes"] = operational_notes
-
         report["recommended_fix"] = {
             "strategy": strategy,
             "actions": actions,
-            "commands": safe_commands[:5],
+            "commands": commands[:6],
         }
 
         report["agent_reasoning"] = self._build_agent_reasoning(compact_input)
@@ -432,114 +510,80 @@ Structured input:
         report["verification"] = {
             "intent": (report.get("verification") or {}).get(
                 "intent",
-                "Confirm that the affected workload becomes healthy and traffic can reach the backend service."
+                "Confirm that the primary Service has endpoints and client traffic can reach the backend."
             ),
-            "commands": verification_commands[:5],
+            "commands": verification_commands[:6],
         }
 
         return report
 
-    def _sanitize_root_cause_story(self, story: str, facts: Dict[str, Any]) -> str:
-        """
-        Keep the LLM root-cause story focused on the confirmed primary cause.
+    def _extract_additional_findings(self, compact_input: Dict[str, Any]) -> List[Dict[str, str]]:
+        facts = compact_input.get("root_cause_facts") or {}
+        root_type = facts.get("root_cause_type") or (compact_input.get("primary_signal") or {}).get("anomaly_type")
 
-        Example:
-        If ServiceTargetPortMismatch is the primary root cause, resource pressure
-        may be mentioned only as operational context, not as a proven cause.
-        """
+        findings = []
 
-        story = str(story or "").strip()
-
-        if facts.get("root_cause_type") != "ServiceTargetPortMismatch":
-            return story
-
-        if not story:
-            return story
-
-        sentences = re.split(r"(?<=[.!?])\s+", story)
-        kept = []
-
-        for sentence in sentences:
-            lower = sentence.lower()
-
-            mentions_metrics = (
-                "cpu" in lower
-                or "memory" in lower
-                or "resource pressure" in lower
-                or "node pressure" in lower
+        for signal in compact_input.get("supporting_signals", []) or []:
+            anomaly = signal.get("anomaly_type") or ""
+            summary = signal.get("summary") or ""
+            resource = (
+                signal.get("deployment_name")
+                or signal.get("pod_name")
+                or signal.get("service_name")
+                or signal.get("node_name")
+                or "scope resource"
             )
 
-            makes_causal_claim = (
-                "exacerbat" in lower
-                or "contribut" in lower
-                or "caus" in lower
-                or "impacting" in lower
-                or "instability" in lower
+            lower = f"{anomaly} {summary}".lower()
+
+            if root_type in {"ServiceSelectorMismatch", "EmptyServiceEndpoints", "EmptyEndpoints"}:
+                if any(token in lower for token in ["imagepull", "errimagepull", "crashloop", "databaseconnectionerror", "cpu", "memory", "resource"]):
+                    findings.append(
+                        {
+                            "resource": str(resource),
+                            "finding": str(anomaly or "Additional finding"),
+                            "impact": str(summary or "Additional issue detected in the same namespace/node scope."),
+                            "priority": "Follow-up",
+                        }
+                    )
+
+        return self._dedupe_findings(findings)
+
+    def _normalize_additional_findings(self, findings: Any) -> List[Dict[str, str]]:
+        if not isinstance(findings, list):
+            return []
+
+        normalized = []
+
+        for item in findings:
+            if not isinstance(item, dict):
+                continue
+
+            normalized.append(
+                {
+                    "resource": str(item.get("resource") or "scope resource"),
+                    "finding": str(item.get("finding") or "Additional finding"),
+                    "impact": str(item.get("impact") or item.get("summary") or "Additional issue detected in the same scope."),
+                    "priority": str(item.get("priority") or "Follow-up"),
+                }
             )
 
-            if mentions_metrics and makes_causal_claim:
+        return self._dedupe_findings(normalized)[:8]
+
+    def _dedupe_findings(self, findings: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        seen = set()
+        result = []
+
+        for item in findings:
+            key = (item.get("resource"), item.get("finding"), item.get("impact"))
+
+            if key in seen:
                 continue
 
-            kept.append(sentence)
+            seen.add(key)
+            result.append(item)
 
-        cleaned = " ".join(kept).strip()
-        return cleaned or story
-
-    def _extract_operational_notes(
-        self,
-        actions: List[Dict[str, str]],
-        facts: Dict[str, Any],
-    ) -> List[str]:
-        notes: List[str] = []
-
-        root_type = facts.get("root_cause_type")
-
-        for action in actions:
-            action_type = str(action.get("action_type", ""))
-            reason = str(action.get("reason", ""))
-
-            lower = f"{action_type} {reason}".lower()
-
-            if root_type == "ServiceTargetPortMismatch" and (
-                "cpu" in lower
-                or "memory" in lower
-                or "resource" in lower
-                or "node pressure" in lower
-            ):
-                notes.append(
-                    "The Metrics Agent also observed node resource pressure. Treat this as operational context and monitor it separately after the primary Service routing issue is fixed."
-                )
-
-        return self._dedupe(notes)
-
-    def _filter_primary_actions(
-        self,
-        actions: List[Dict[str, str]],
-        facts: Dict[str, Any],
-    ) -> List[Dict[str, str]]:
-        root_type = facts.get("root_cause_type")
-
-        if root_type != "ServiceTargetPortMismatch":
-            return actions
-
-        filtered: List[Dict[str, str]] = []
-
-        for action in actions:
-            action_type = str(action.get("action_type", ""))
-            reason = str(action.get("reason", ""))
-            lower = f"{action_type} {reason}".lower()
-
-            if (
-                "cpu" in lower
-                or "memory" in lower
-                or "resource" in lower
-                or "node pressure" in lower
-            ):
-                continue
-
-            filtered.append(action)
-
-        return filtered
+        return result
 
     def _sanitize_actions(self, actions: Any) -> List[Dict[str, str]]:
         if not isinstance(actions, list):
@@ -562,6 +606,28 @@ Structured input:
 
         return safe_actions[:6]
 
+    def _extract_operational_notes(
+        self,
+        actions: List[Dict[str, str]],
+        facts: Dict[str, Any],
+    ) -> List[str]:
+        notes: List[str] = []
+        root_type = facts.get("root_cause_type")
+
+        for action in actions:
+            action_type = str(action.get("action_type", ""))
+            reason = str(action.get("reason", ""))
+            lower = f"{action_type} {reason}".lower()
+
+            if root_type in {"ServiceSelectorMismatch", "EmptyServiceEndpoints", "EmptyEndpoints", "ServiceTargetPortMismatch"} and (
+                "cpu" in lower or "memory" in lower or "resource" in lower or "node pressure" in lower
+            ):
+                notes.append(
+                    "The Metrics Agent also observed node resource pressure. Treat this as operational context and monitor it separately after the primary service issue is fixed."
+                )
+
+        return self._dedupe(notes)
+
     def _commands_from_actions(
         self,
         actions: List[Dict[str, str]],
@@ -575,11 +641,7 @@ Structured input:
         for action in actions:
             action_type = action.get("action_type")
 
-            if action_type in {
-                "align_service_target_port",
-                "patch_service_target_port",
-                "fix_service_target_port_mismatch",
-            }:
+            if action_type in {"align_service_target_port", "patch_service_target_port", "fix_service_target_port_mismatch"}:
                 commands.extend(
                     self._build_service_target_port_commands(
                         namespace=namespace,
@@ -589,10 +651,54 @@ Structured input:
                     )
                 )
 
+            elif action_type in {"align_service_selector", "fix_service_selector_mismatch"}:
+                commands.extend(
+                    self._build_service_selector_commands(
+                        namespace=namespace,
+                        service=service,
+                        facts=facts,
+                    )
+                )
+
             elif action_type == "investigate_further":
                 commands.extend(self._safe_investigation_commands(namespace, service, deployment))
 
         return self._dedupe(commands)
+
+    def _build_service_selector_commands(
+        self,
+        namespace: str,
+        service: str,
+        facts: Dict[str, Any],
+    ) -> List[str]:
+        if not namespace or not service or service == "affected-service":
+            return []
+
+        selector_key = facts.get("selector_key")
+        selector_pointer_key = facts.get("selector_json_pointer_key") or str(selector_key).replace("~", "~0").replace("/", "~1")
+        selector_value = facts.get("expected_selector_value") or facts.get("correct_selector_value")
+
+        if selector_key and selector_value:
+            patch_file = "opslens_service_selector_patch.json"
+            patch = (
+                "@'\n"
+                f"[{{\"op\":\"replace\",\"path\":\"/spec/selector/{selector_pointer_key}\",\"value\":\"{selector_value}\"}}]\n"
+                "'@ | Set-Content .\\" + patch_file + " -Encoding ascii\n"
+                f"kubectl patch service {service} -n {namespace} --type=json --patch-file .\\{patch_file}\n"
+                f"Remove-Item .\\{patch_file} -Force"
+            )
+
+            return [
+                patch,
+                f"kubectl get endpoints {service} -n {namespace}",
+                f"kubectl logs deployment/frontend-client -n {namespace} --tail=20",
+            ]
+
+        return [
+            f"kubectl get svc {service} -n {namespace} -o yaml",
+            f"kubectl get pods -n {namespace} --show-labels",
+            f"kubectl get endpoints {service} -n {namespace}",
+        ]
 
     def _build_service_target_port_commands(
         self,
@@ -652,11 +758,12 @@ Structured input:
 
         if service and service != "affected-service":
             commands.append(f"kubectl get svc {service} -n {namespace} -o yaml")
+            commands.append(f"kubectl get endpoints {service} -n {namespace}")
+
+        commands.append(f"kubectl get pods -n {namespace} --show-labels")
 
         if deployment and deployment != "affected-deployment":
             commands.append(f"kubectl describe deployment {deployment} -n {namespace}")
-
-        commands.append(f"kubectl get pods -n {namespace} --show-labels")
 
         return commands
 
@@ -669,16 +776,13 @@ Structured input:
     ) -> List[str]:
         commands: List[str] = []
 
-        if deployment and deployment != "affected-deployment":
-            commands.append(f"kubectl rollout status deployment/{deployment} -n {namespace}")
-
         if service and service != "affected-service":
             commands.append(f"kubectl get endpoints {service} -n {namespace}")
 
         commands.append(f"kubectl get pods -n {namespace}")
 
-        if deployment and deployment != "affected-deployment":
-            commands.append(f"kubectl describe deployment {deployment} -n {namespace}")
+        if service and service != "affected-service":
+            commands.append(f"kubectl get svc {service} -n {namespace} -o yaml")
 
         frontend = self._extract_frontend_deployment(compact_input)
         if frontend:
@@ -687,43 +791,45 @@ Structured input:
         return commands
 
     def _build_agent_reasoning(self, compact_input: Dict[str, Any]) -> List[Dict[str, str]]:
+        rows = []
+
         primary = compact_input.get("primary_signal") or {}
         primary_type = primary.get("anomaly_type")
-
-        if primary_type == "ServiceTargetPortMismatch":
-            return [
-                {
-                    "agent": "Config Agent",
-                    "finding": "ServiceTargetPortMismatch",
-                    "meaning": "The Service targetPort is pointing to a port that the backend container is not actually exposing.",
-                },
-                {
-                    "agent": "Kubernetes Events Agent",
-                    "finding": "Unhealthy / Readiness failures",
-                    "meaning": "Kubernetes reports health-check failures because the pod readiness probe is also checking the wrong port.",
-                },
-                {
-                    "agent": "Logs Agent",
-                    "finding": "ConnectionRefused",
-                    "meaning": "Frontend/application logs confirm that traffic cannot successfully reach the backend service.",
-                },
-                {
-                    "agent": "Metrics Agent",
-                    "finding": "CPU/Memory anomaly",
-                    "meaning": "Supporting context only; it may indicate node pressure, but it is not the direct cause of this Service routing failure.",
-                },
-            ]
-
-        rows = []
 
         if primary_type:
             rows.append(
                 {
-                    "agent": self._canonical_agent_name(primary.get("source_agent")),
+                    "agent": self._canonical_agent_name(primary.get("source_agent"), primary_type),
                     "finding": primary_type,
                     "meaning": primary.get("summary") or "This was selected as the primary signal.",
                 }
             )
+
+        for evidence in compact_input.get("important_evidence", []) or []:
+            text = str(evidence)
+
+            if len(rows) >= 4:
+                break
+
+            lower = text.lower()
+
+            if "connectionrefused" in lower or "connection refused" in lower:
+                rows.append(
+                    {
+                        "agent": "Logs Agent",
+                        "finding": "ConnectionRefused",
+                        "meaning": "Client/application logs show the service cannot be reached.",
+                    }
+                )
+
+            elif "endpoint" in lower and "no" in lower:
+                rows.append(
+                    {
+                        "agent": "Config Agent",
+                        "finding": "EmptyEndpoints",
+                        "meaning": "The Service currently has no backend endpoints.",
+                    }
+                )
 
         for signal in compact_input.get("supporting_signals", []) or []:
             if len(rows) >= 4:
@@ -733,37 +839,65 @@ Structured input:
             if not anomaly_type:
                 continue
 
+            if primary_type in {"ServiceSelectorMismatch", "EmptyServiceEndpoints", "EmptyEndpoints"}:
+                lower_anomaly = str(anomaly_type).lower()
+                if any(token in lower_anomaly for token in ["imagepull", "errimagepull", "crashloop", "backoff", "cpu", "memory", "resource"]):
+                    continue
+
             rows.append(
                 {
-                    "agent": self._canonical_agent_name(signal.get("source_agent")),
+                    "agent": self._canonical_agent_name(signal.get("source_agent"), anomaly_type),
                     "finding": anomaly_type,
                     "meaning": signal.get("summary") or "This signal supports the investigation.",
                 }
             )
 
-        return rows[:4]
+        return self._dedupe_agent_rows(rows)[:4]
 
-    def _canonical_agent_name(self, source_agent: Any) -> str:
+    def _dedupe_agent_rows(self, rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        seen = set()
+        result = []
+
+        for row in rows:
+            key = (row.get("agent"), row.get("finding"))
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            result.append(row)
+
+        return result
+
+    def _canonical_agent_name(self, source_agent: Any, anomaly_type: Any = None) -> str:
         raw = str(source_agent or "").lower()
+        anomaly = str(anomaly_type or "").lower()
 
         mapping = {
             "ansible_config": "Config Agent",
-            "ansible_config_agent": "Config Agent",
             "config": "Config Agent",
             "kubernetes_events": "Kubernetes Events Agent",
-            "kubernetes_events_agent": "Kubernetes Events Agent",
             "logs": "Logs Agent",
-            "logs_agent": "Logs Agent",
-            "log_analyzer": "Logs Agent",
+            "log": "Logs Agent",
             "resource_metrics": "Metrics Agent",
-            "resource_metrics_agent": "Metrics Agent",
             "metrics": "Metrics Agent",
-            "metrics_agent": "Metrics Agent",
         }
 
         for key, value in mapping.items():
             if key in raw:
                 return value
+
+        if any(token in anomaly for token in ["selector", "endpoint", "targetport", "deploymentnoavailable"]):
+            return "Config Agent"
+
+        if any(token in anomaly for token in ["imagepull", "errimagepull", "crashloop", "backoff", "unhealthy"]):
+            return "Kubernetes Events Agent"
+
+        if any(token in anomaly for token in ["connectionrefused", "databaseconnection", "runtimeerror", "log"]):
+            return "Logs Agent"
+
+        if any(token in anomaly for token in ["cpu", "memory", "resource"]):
+            return "Metrics Agent"
 
         return "Investigation Agent"
 
@@ -779,6 +913,7 @@ Structured input:
             "affected_resources": affected,
             "incident_summary": "OpsLens collected incident evidence, but the LLM was unavailable. A safe fallback report was generated from Supervisor facts.",
             "root_cause_story": "Review the evidence trail and run the safe inspection commands to confirm the active failure mode.",
+            "additional_findings": compact_input.get("additional_findings", []),
             "recommended_fix": {
                 "strategy": "Use safe investigation commands until LLM reasoning is available.",
                 "actions": [
@@ -798,14 +933,23 @@ Structured input:
     def _extract_frontend_deployment(self, compact_input: Dict[str, Any]) -> Optional[str]:
         text = json.dumps(compact_input, default=str)
 
-        match = re.search(r"(fullstack-frontend-client)-[a-z0-9]+-[a-z0-9]+", text)
-        if match:
-            return match.group(1)
+        patterns = [
+            r"(fullstack-frontend-client)-[a-z0-9]+-[a-z0-9]+",
+            r"(frontend-client)-[a-z0-9]+-[a-z0-9]+",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
 
         for signal in compact_input.get("supporting_signals", []) or []:
             pod_name = signal.get("pod_name")
             if pod_name and "frontend" in pod_name:
                 return self._deployment_from_pod_name(pod_name)
+
+        if "frontend-client" in text:
+            return "frontend-client"
 
         return None
 
@@ -828,8 +972,12 @@ Structured input:
         result = []
 
         for item in items:
+            if not item:
+                continue
+
             if item in seen:
                 continue
+
             seen.add(item)
             result.append(item)
 
@@ -871,17 +1019,19 @@ Structured input:
         lines.append(f"**Confidence:** {report.get('confidence')}")
         lines.append(f"**Namespace:** {namespace}")
         lines.append(f"**Node:** {node}")
-        lines.append(f"**Service:** {service}")
+
+        if service:
+            lines.append(f"**Primary Service:** {service}")
 
         if deployment:
-            lines.append(f"**Deployment:** {deployment}")
+            lines.append(f"**Primary Deployment:** {deployment}")
 
         lines.append("")
         lines.append("## Incident Summary")
         lines.append(report.get("incident_summary", ""))
 
         lines.append("")
-        lines.append("## Root Cause Story")
+        lines.append("## Primary Root Cause")
         lines.append(report.get("root_cause_story", ""))
 
         lines.append("")
@@ -895,6 +1045,22 @@ Structured input:
                 f"| {self._table_cell(row.get('agent'))} | {self._table_cell(row.get('finding'))} | {self._table_cell(row.get('meaning'))} |"
             )
 
+        additional = report.get("additional_findings", [])
+
+        if additional:
+            lines.append("")
+            lines.append("## Additional Findings in Scope")
+            lines.append("")
+            lines.append("These findings were detected in the same selected namespace/node scope. They should be handled after the primary incident unless they are proven to directly affect the primary service.")
+            lines.append("")
+            lines.append("| Resource | Finding | Impact | Priority |")
+            lines.append("|---|---|---|---|")
+
+            for item in additional:
+                lines.append(
+                    f"| {self._table_cell(item.get('resource'))} | {self._table_cell(item.get('finding'))} | {self._table_cell(item.get('impact'))} | {self._table_cell(item.get('priority'))} |"
+                )
+
         lines.append("")
         lines.append("## Recommended Fix")
         lines.append("")
@@ -904,17 +1070,22 @@ Structured input:
         actions = recommended_fix.get("actions", [])
         if actions:
             lines.append("")
-            lines.append("### Recommended Actions")
+            lines.append("### Prioritized Action Plan")
 
             for index, action in enumerate(actions, start=1):
                 lines.append("")
-                lines.append(f"**Action {index}:** `{action.get('action_type', '')}`")
+                lines.append(f"**Priority {index}:** `{action.get('action_type', '')}`")
                 if action.get("reason"):
                     lines.append(f"- Reason: {action.get('reason')}")
                 if action.get("risk"):
                     lines.append(f"- Risk: {action.get('risk')}")
 
-        commands = recommended_fix.get("commands", [])
+        commands = [
+            str(command).strip()
+            for command in recommended_fix.get("commands", [])
+            if str(command).strip()
+        ]
+
         if commands:
             lines.append("")
             lines.append("### Safe Remediation / Investigation Commands")
@@ -927,13 +1098,13 @@ Structured input:
                 lines.append(command)
                 lines.append("```")
 
-        operational_notes = report.get("operational_notes", [])
+        notes = report.get("operational_notes", [])
 
-        if operational_notes:
+        if notes:
             lines.append("")
             lines.append("### Operational Notes")
 
-            for note in operational_notes:
+            for note in notes:
                 lines.append(f"- {note}")
 
         lines.append("")
