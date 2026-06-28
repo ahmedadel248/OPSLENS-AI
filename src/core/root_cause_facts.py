@@ -94,7 +94,7 @@ def _find_service_name(report: Dict[str, Any]) -> str:
         if match:
             return match.group(1)
 
-    return "affected-service"
+    return ""
 
 
 def _find_deployment_name(report: Dict[str, Any]) -> str:
@@ -111,7 +111,7 @@ def _find_deployment_name(report: Dict[str, Any]) -> str:
         if match:
             return match.group(1)
 
-    return "affected-deployment"
+    return ""
 
 
 def _find_node_name(report: Dict[str, Any]) -> str:

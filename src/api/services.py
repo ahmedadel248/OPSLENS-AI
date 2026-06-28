@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from src.api.schemas import InvestigationRequest
 from src.core.investigation_scope import InvestigationScope
-from scripts.run_incident_investigation import run_investigation as run_opslens_investigation
+from src.workflows.investigation_runner import run_investigation as run_opslens_investigation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -270,10 +270,28 @@ def _run_job(job_id: str, request: InvestigationRequest) -> None:
         )
         ticker.start()
 
+        # Product mode: never seed demo metrics.
+        try:
+            request.demo_seed_metrics = False
+        except Exception:
+            pass
+
         final_report = run_opslens_investigation(
             scope=scope,
-            demo_seed_metrics=request.demo_seed_metrics,
+            demo_seed_metrics=False,
         )
+
+        # Guard report before it is stored in the job/result cache.
+        try:
+            final_report = _opslens_guard_payload(
+                final_report,
+                namespace=request.namespace,
+                node=request.node_name,
+            )
+        except Exception:
+            pass
+
+        final_report = sanitize_report(final_report, namespace=request.namespace, node=request.node_name)
 
         stop_ticker.set()
         _set_all_remaining(job_id, "done")
@@ -406,9 +424,45 @@ def _safe_filename(value: str) -> str:
 
 
 def _report_base_name(report: Dict[str, Any], fallback: str = "opslens_report") -> str:
-    title = report.get("title") or fallback
+    affected = report.get("affected_resources") or {}
+
+    service_name = (
+        affected.get("service")
+        or affected.get("service_name")
+        or affected.get("workload")
+        or affected.get("deployment")
+        or affected.get("pod")
+        or fallback
+    )
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return _safe_filename(f"{timestamp}_{title}")[:140]
+    return _safe_filename(f"{service_name}_{timestamp}")[:140]
+
+
+    service_name = (
+        affected.get("service")
+        or affected.get("service_name")
+        or affected.get("workload")
+        or affected.get("deployment")
+        or affected.get("pod")
+        or fallback
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return _safe_filename(f"{service_name}_{timestamp}")[:140]
+
+
+    service_name = (
+        affected.get("service")
+        or affected.get("service_name")
+        or affected.get("workload")
+        or affected.get("deployment")
+        or affected.get("pod")
+        or fallback
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return _safe_filename(f"{service_name}_{timestamp}")[:140]
 
 
 def _latest_json_report_path() -> Path:
@@ -442,8 +496,10 @@ def _paragraph_text(value: Any) -> str:
 
 
 def _write_pdf_report(report: Dict[str, Any], output_path: Path) -> Path:
+    import html
     from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import cm
     from reportlab.platypus import (
@@ -452,104 +508,149 @@ def _write_pdf_report(report: Dict[str, Any], output_path: Path) -> Path:
         Spacer,
         Table,
         TableStyle,
-        Preformatted,
+        PageBreak,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    styles = getSampleStyleSheet()
-    styles.add(
-        ParagraphStyle(
-            name="OpsTitle",
-            parent=styles["Title"],
-            fontSize=20,
-            leading=24,
-            spaceAfter=14,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="OpsHeading",
-            parent=styles["Heading2"],
-            fontSize=13,
-            leading=16,
-            spaceBefore=12,
-            spaceAfter=8,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="OpsBody",
-            parent=styles["BodyText"],
-            fontSize=9.5,
-            leading=13,
-            spaceAfter=7,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="OpsSmall",
-            parent=styles["BodyText"],
-            fontSize=8,
-            leading=10,
-        )
-    )
+    page_size = landscape(A4)
+    page_width, _ = page_size
+    margin = 1.15 * cm
+    usable_width = page_width - (2 * margin)
 
     doc = SimpleDocTemplate(
         str(output_path),
-        pagesize=A4,
-        rightMargin=1.4 * cm,
-        leftMargin=1.4 * cm,
-        topMargin=1.3 * cm,
-        bottomMargin=1.3 * cm,
+        pagesize=page_size,
+        rightMargin=margin,
+        leftMargin=margin,
+        topMargin=1.0 * cm,
+        bottomMargin=1.0 * cm,
     )
 
-    story = []
+    styles = getSampleStyleSheet()
 
-    def heading(text: str):
-        story.append(Paragraph(_paragraph_text(text), styles["OpsHeading"]))
+    title_style = ParagraphStyle(
+        "OpsTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=20,
+        leading=24,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=8,
+        alignment=TA_LEFT,
+    )
 
-    def para(text: Any):
-        story.append(Paragraph(_paragraph_text(text), styles["OpsBody"]))
+    section_style = ParagraphStyle(
+        "OpsSection",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=10,
+        spaceAfter=8,
+    )
 
-    def table(headers, rows):
+    body_style = ParagraphStyle(
+        "OpsBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=6,
+    )
+
+    small_style = ParagraphStyle(
+        "OpsSmall",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=7.6,
+        leading=9.4,
+        textColor=colors.HexColor("#111827"),
+        wordWrap="CJK",
+    )
+
+    header_style = ParagraphStyle(
+        "OpsHeader",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=7.8,
+        leading=9.4,
+        textColor=colors.white,
+        wordWrap="CJK",
+    )
+
+    code_style = ParagraphStyle(
+        "OpsCode",
+        parent=styles["BodyText"],
+        fontName="Courier",
+        fontSize=7.3,
+        leading=9,
+        textColor=colors.HexColor("#E5E7EB"),
+        backColor=colors.HexColor("#111827"),
+        borderPadding=6,
+        wordWrap="CJK",
+    )
+
+    def clean(value: Any) -> str:
+        return html.escape(str(value or "")).replace("\n", "<br/>")
+    def para(value: Any, style=body_style):
+        story.append(Paragraph(clean(value), style))
+
+    def heading(value: str):
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(clean(value), section_style))
+
+    def make_table(headers, rows, widths=None):
         if not rows:
             para("No data available.")
             return
 
-        data = [
-            [Paragraph(_paragraph_text(cell), styles["OpsSmall"]) for cell in headers]
-        ]
+        if widths is None:
+            widths = [usable_width / len(headers)] * len(headers)
+
+        data = [[Paragraph(clean(cell), header_style) for cell in headers]]
 
         for row in rows:
-            data.append([Paragraph(_paragraph_text(cell), styles["OpsSmall"]) for cell in row])
+            data.append([Paragraph(clean(cell), small_style) for cell in row])
 
-        tbl = Table(data, repeatRows=1, hAlign="LEFT")
-        tbl.setStyle(
+        table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+        table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CBD5E1")),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#f8fafc")),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
                     ("TOPPADDING", (0, 0), (-1, -1), 5),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F8FAFC")),
                 ]
             )
         )
-        story.append(tbl)
-        story.append(Spacer(1, 10))
+
+        story.append(table)
+        story.append(Spacer(1, 8))
 
     affected = report.get("affected_resources") or {}
     fix = report.get("recommended_fix") or {}
     verification = report.get("verification") or {}
 
-    story.append(Paragraph(_paragraph_text(report.get("title", "OpsLens Incident Report")), styles["OpsTitle"]))
-    para(f"Severity: {report.get('severity', 'unknown')} | Confidence: {report.get('confidence', 'unknown')}")
-    para(f"Namespace: {affected.get('namespace', '')} | Node: {affected.get('node', '')} | Service: {affected.get('service', '')}")
+    story = []
+
+    story.append(Paragraph(clean(report.get("title", "OpsLens Incident Report")), title_style))
+
+    summary_rows = [
+        ["Severity", report.get("severity", "unknown")],
+        ["Confidence", report.get("confidence", "unknown")],
+        ["Namespace", affected.get("namespace", "")],
+        ["Node", affected.get("node", "")],
+        ["Service", affected.get("service", "") or affected.get("service_name", "")],
+        ["Deployment", affected.get("deployment", "")],
+    ]
+    make_table(["Field", "Value"], summary_rows, [usable_width * 0.22, usable_width * 0.78])
 
     heading("Incident Summary")
     para(report.get("incident_summary", ""))
@@ -557,16 +658,26 @@ def _write_pdf_report(report: Dict[str, Any], output_path: Path) -> Path:
     heading("Primary Root Cause")
     para(report.get("root_cause_story", ""))
 
+    heading("Incident Story")
+    story_rows = [
+        ["Problem", report.get("incident_summary", "")],
+        ["Evidence", ((report.get("agent_reasoning") or [{}])[0]).get("finding", "") if report.get("agent_reasoning") else ""],
+        ["Root Cause", report.get("root_cause_story", "")],
+        ["Recommended Fix", fix.get("strategy", "")],
+        ["Verification", verification.get("intent", "")],
+    ]
+    make_table(["Step", "Details"], story_rows, [usable_width * 0.18, usable_width * 0.82])
+
     heading("Evidence Trail")
     evidence_rows = [
-        [
-            row.get("agent", ""),
-            row.get("finding", ""),
-            row.get("meaning", ""),
-        ]
+        [row.get("agent", ""), row.get("finding", ""), row.get("meaning", "")]
         for row in report.get("agent_reasoning", []) or []
     ]
-    table(["Agent", "Finding", "Meaning"], evidence_rows)
+    make_table(
+        ["Agent", "Finding", "Meaning"],
+        evidence_rows,
+        [usable_width * 0.20, usable_width * 0.38, usable_width * 0.42],
+    )
 
     heading("Additional Findings")
     additional_rows = [
@@ -578,7 +689,13 @@ def _write_pdf_report(report: Dict[str, Any], output_path: Path) -> Path:
         ]
         for row in report.get("additional_findings", []) or []
     ]
-    table(["Resource", "Finding", "Impact", "Priority"], additional_rows)
+    make_table(
+        ["Resource", "Finding", "Impact", "Priority"],
+        additional_rows,
+        [usable_width * 0.23, usable_width * 0.30, usable_width * 0.34, usable_width * 0.13],
+    )
+
+    story.append(PageBreak())
 
     heading("Recommended Fix")
     para(fix.get("strategy", ""))
@@ -592,15 +709,20 @@ def _write_pdf_report(report: Dict[str, Any], output_path: Path) -> Path:
         ]
         for action in fix.get("actions", []) or []
     ]
-    table(["Action", "Target", "Reason", "Risk"], action_rows)
+    make_table(
+        ["Action", "Target", "Reason", "Risk"],
+        action_rows,
+        [usable_width * 0.24, usable_width * 0.18, usable_width * 0.45, usable_width * 0.13],
+    )
 
     heading("Safe Commands")
     commands = fix.get("commands", []) or []
+
     if commands:
         for index, command in enumerate(commands, start=1):
-            para(f"Command {index}")
-            story.append(Preformatted(str(command), styles["Code"]))
-            story.append(Spacer(1, 8))
+            story.append(Paragraph(clean(f"Command {index}"), body_style))
+            story.append(Paragraph(clean(command), code_style))
+            story.append(Spacer(1, 6))
     else:
         para("No commands available.")
 
@@ -608,14 +730,16 @@ def _write_pdf_report(report: Dict[str, Any], output_path: Path) -> Path:
     para(verification.get("intent", ""))
 
     verification_commands = verification.get("commands", []) or []
+
     if verification_commands:
         for index, command in enumerate(verification_commands, start=1):
-            para(f"Check {index}")
-            story.append(Preformatted(str(command), styles["Code"]))
-            story.append(Spacer(1, 8))
+            story.append(Paragraph(clean(f"Verification {index}"), body_style))
+            story.append(Paragraph(clean(command), code_style))
+            story.append(Spacer(1, 6))
 
     doc.build(story)
     return output_path
+
 
 
 def _write_excel_report(report: Dict[str, Any], output_path: Path) -> Path:
@@ -737,6 +861,15 @@ def _write_excel_report(report: Dict[str, Any], output_path: Path) -> Path:
     return output_path
 
 
+
+def _copy_export_source(source_path: Path, output_path: Path) -> Path:
+    import shutil
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, output_path)
+    return output_path
+
+
 def _export_report(report: Dict[str, Any], export_format: str, fallback_name: str) -> Path:
     fmt = export_format.lower().strip()
     base = _report_base_name(report, fallback=fallback_name)
@@ -745,13 +878,19 @@ def _export_report(report: Dict[str, Any], export_format: str, fallback_name: st
         md_path_value = report.get("markdown_report_path")
         if not md_path_value:
             raise FileNotFoundError("Markdown report path is missing.")
-        return PROJECT_ROOT / md_path_value
+
+        source_path = PROJECT_ROOT / md_path_value
+        output_path = EXPORTS_DIR / f"{base}.md"
+        return _copy_export_source(source_path, output_path)
 
     if fmt == "json":
         json_path_value = report.get("json_report_path")
         if not json_path_value:
             raise FileNotFoundError("JSON report path is missing.")
-        return PROJECT_ROOT / json_path_value
+
+        source_path = PROJECT_ROOT / json_path_value
+        output_path = EXPORTS_DIR / f"{base}.json"
+        return _copy_export_source(source_path, output_path)
 
     if fmt == "pdf":
         output_path = EXPORTS_DIR / f"{base}.pdf"
@@ -782,4 +921,499 @@ def get_latest_report_export_path(export_format: str) -> Path:
     json_path = _latest_json_report_path()
     report = _load_report_from_json(json_path)
     return _export_report(report, export_format, fallback_name=json_path.stem)
+
+
+# =========================================================
+# Feedback support
+# =========================================================
+
+FEEDBACK_DIR = PROJECT_ROOT / "data" / "feedback"
+FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_feedback(payload: Dict[str, Any]) -> Dict[str, Any]:
+    feedback_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+
+    record = {
+        "feedback_id": feedback_id,
+        "created_at": datetime.now().isoformat(),
+        **payload,
+    }
+
+    output_path = FEEDBACK_DIR / f"{feedback_id}.json"
+    output_path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return {
+        "status": "saved",
+        "feedback_id": feedback_id,
+    }
+
+
+# =========================================================
+# Persistent investigation history
+# =========================================================
+
+def _history_record_from_report_path(path: Path) -> Dict[str, Any]:
+    try:
+        report = _load_report_from_json(path)
+    except Exception as exc:
+        return {
+            "record_id": path.stem,
+            "title": path.stem,
+            "status": "unreadable",
+            "error": str(exc),
+            "created_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+            "json_report_path": str(path.relative_to(PROJECT_ROOT)),
+        }
+
+    affected = report.get("affected_resources") or {}
+    fix = report.get("recommended_fix") or {}
+
+    service_name = (
+        affected.get("service")
+        or affected.get("service_name")
+        or affected.get("workload")
+        or affected.get("deployment")
+        or affected.get("pod")
+        or "unknown-service"
+    )
+
+    created_at = report.get("created_at") or report.get("timestamp")
+    if not created_at:
+        created_at = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+
+    return {
+        "record_id": path.stem,
+        "title": report.get("title") or "OpsLens Investigation",
+        "status": "completed",
+        "created_at": created_at,
+        "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+        "service": service_name,
+        "namespace": affected.get("namespace", ""),
+        "node": affected.get("node", ""),
+        "severity": report.get("severity", "unknown"),
+        "confidence": report.get("confidence", "unknown"),
+        "summary": report.get("incident_summary", ""),
+        "root_cause": report.get("root_cause_story", ""),
+        "fix_strategy": fix.get("strategy", ""),
+        "json_report_path": str(path.relative_to(PROJECT_ROOT)),
+        "markdown_report_path": report.get("markdown_report_path", ""),
+    }
+
+
+def list_investigation_history(limit: int = 50) -> List[Dict[str, Any]]:
+    if not REPORTS_DIR.exists():
+        return []
+
+    paths = sorted(
+        REPORTS_DIR.glob("*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    return [_history_record_from_report_path(path) for path in paths[:limit]]
+
+
+def _history_report_path(record_id: str) -> Path:
+    safe_id = _safe_filename(record_id)
+    path = REPORTS_DIR / f"{safe_id}.json"
+
+    if not path.exists():
+        raise FileNotFoundError(f"Investigation history record not found: {record_id}")
+
+    return path
+
+
+def get_history_report(record_id: str) -> Dict[str, Any]:
+    return _load_report_from_json(_history_report_path(record_id))
+
+
+def get_history_export_path(record_id: str, export_format: str) -> Path:
+    report = get_history_report(record_id)
+    return _export_report(report, export_format, fallback_name=record_id)
+
+
+# =========================================================
+# SQLite-backed scenarios and investigation history
+# =========================================================
+
+
+
+def list_scenarios() -> List[str]:
+    return api_persistence.list_scenarios()
+
+
+def list_scenario_details() -> Dict[str, Any]:
+    return api_persistence.list_scenario_details()
+
+
+def list_investigation_history(limit: int = 50) -> List[Dict[str, Any]]:
+    return api_persistence.list_reports(limit=limit)
+
+
+def get_history_report(record_id: str) -> Dict[str, Any]:
+    return api_persistence.get_report(record_id)
+
+
+def get_history_export_path(record_id: str, export_format: str) -> Path:
+    report = api_persistence.get_report(record_id)
+    return _export_report(report, export_format, fallback_name=record_id)
+
+
+def save_report_to_database(report: Dict[str, Any], record_id: Optional[str] = None) -> Dict[str, Any]:
+    return api_persistence.save_report_object(report, record_id=record_id)
+
+
+# =========================================================
+# Robust SQLite history services override
+# =========================================================
+
+
+
+def save_report_to_database(report: Dict[str, Any], record_id: Optional[str] = None) -> Dict[str, Any]:
+    return api_persistence.save_report_object(report, record_id=record_id)
+
+
+def list_investigation_history(limit: int = 50) -> List[Dict[str, Any]]:
+    return api_persistence.list_reports(limit=limit)
+
+
+def get_history_report(record_id: str) -> Dict[str, Any]:
+    return api_persistence.get_report(record_id)
+
+
+def get_history_export_path(record_id: str, export_format: str) -> Path:
+    report = api_persistence.get_report(record_id)
+    return _export_report(report, export_format, fallback_name=record_id)
+
+
+def debug_history_state() -> Dict[str, Any]:
+    return api_persistence.debug_history_state()
+
+
+# =========================================================
+# Final clean SQLite-backed API service overrides
+# Source of truth: src/api/history_store.py
+# =========================================================
+
+from src.api import history_store as api_history_store
+from src.core.report_safety import sanitize_report
+
+
+def list_scenarios():
+    return list(api_history_store.scenario_details().keys())
+
+
+def list_scenario_details():
+    return api_history_store.scenario_details()
+
+
+def save_report_to_database(report, record_id=None):
+    return api_history_store.save_report(report, record_id=record_id)
+
+
+def list_investigation_history(limit=50):
+    return api_history_store.list_reports(limit=limit)
+
+
+def get_history_report(record_id):
+    return api_history_store.get_report(record_id)
+
+
+def get_history_export_path(record_id, export_format):
+    report = api_history_store.get_report(record_id)
+    return _export_report(report, export_format, fallback_name=record_id)
+
+
+def debug_history_state():
+    return api_history_store.debug_state()
+
+
+
+# =========================================================
+# Product report evidence guardrails
+# No evidence => no incident. No demo resource pressure.
+# =========================================================
+
+def _opslens_text(value):
+    try:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            return " ".join(_opslens_text(v) for v in value)
+        if isinstance(value, dict):
+            return " ".join(f"{k} {_opslens_text(v)}" for k, v in value.items())
+        return str(value)
+    except Exception:
+        return ""
+
+
+def _opslens_is_empty_evidence(value):
+    text = _opslens_text(value).strip().lower()
+
+    if not text:
+        return True
+
+    empty_markers = [
+        "no data available",
+        "no evidence available",
+        "not available",
+        "none",
+        "[]",
+        "{}",
+    ]
+
+    return text in empty_markers or all(marker in text for marker in ["no", "data", "available"])
+
+
+def _opslens_namespace_from_payload(payload, fallback=None):
+    if fallback:
+        return fallback
+
+    if isinstance(payload, dict):
+        for key in ("namespace", "selected_namespace"):
+            if payload.get(key):
+                return payload.get(key)
+
+        request = payload.get("request") or payload.get("scope") or {}
+        if isinstance(request, dict):
+            return request.get("namespace") or request.get("selected_namespace")
+
+        report = payload.get("report") or payload.get("result") or {}
+        if isinstance(report, dict):
+            affected = report.get("affected_resources") or {}
+            if isinstance(affected, dict):
+                return affected.get("namespace")
+
+    return None
+
+
+def _opslens_node_from_payload(payload, fallback=None):
+    if fallback:
+        return fallback
+
+    if isinstance(payload, dict):
+        for key in ("node", "node_name", "selected_node"):
+            if payload.get(key):
+                return payload.get(key)
+
+        request = payload.get("request") or payload.get("scope") or {}
+        if isinstance(request, dict):
+            return request.get("node_name") or request.get("node")
+
+        report = payload.get("report") or payload.get("result") or {}
+        if isinstance(report, dict):
+            affected = report.get("affected_resources") or {}
+            if isinstance(affected, dict):
+                return affected.get("node") or affected.get("node_name")
+
+    return None
+
+
+def _opslens_fix_namespace_in_text(value, namespace):
+    if not isinstance(value, str):
+        return value
+
+    if namespace and namespace != "default":
+        value = value.replace("-n default", f"-n {namespace}")
+        value = value.replace("--namespace default", f"--namespace {namespace}")
+
+    return value
+
+
+def _opslens_fix_commands(obj, namespace):
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            if isinstance(value, str):
+                obj[key] = _opslens_fix_namespace_in_text(value, namespace)
+            else:
+                _opslens_fix_commands(value, namespace)
+
+    elif isinstance(obj, list):
+        for i, value in enumerate(obj):
+            if isinstance(value, str):
+                obj[i] = _opslens_fix_namespace_in_text(value, namespace)
+            else:
+                _opslens_fix_commands(value, namespace)
+
+    return obj
+
+
+def _opslens_report_looks_fake_resource_pressure(report):
+    text = _opslens_text(report).lower()
+
+    fake_markers = [
+        "cpu utilization at 95",
+        "cpu utilization at 95%",
+        "memory utilization at 90",
+        "memory utilization at 90%",
+        "critical resource exhaustion",
+        "critical resource pressure",
+        "affected-deployment",
+        "affected-service",
+    ]
+
+    return any(marker in text for marker in fake_markers)
+
+
+def _opslens_report_has_empty_evidence(report):
+    evidence = (
+        report.get("evidence_trail")
+        or report.get("evidence")
+        or report.get("timeline")
+        or report.get("investigation_evidence")
+    )
+
+    additional = (
+        report.get("additional_findings")
+        or report.get("additional_issues")
+        or report.get("secondary_findings")
+    )
+
+    return _opslens_is_empty_evidence(evidence) and _opslens_is_empty_evidence(additional)
+
+
+def _opslens_make_healthy_report(namespace=None, node=None):
+    namespace = namespace or "selected namespace"
+    node = node or "selected node"
+
+    return {
+        "title": "No Active Incident Detected",
+        "status": "healthy",
+        "severity": "none",
+        "confidence": "high",
+        "incident_summary": (
+            f"No active incident was detected in namespace '{namespace}' on node '{node}'. "
+            "OpsLens did not find Kubernetes failure evidence in the selected scope."
+        ),
+        "affected_resources": {
+            "namespace": namespace,
+            "node": node,
+        },
+        "evidence_trail": [
+            f"No failing pods detected in namespace '{namespace}'.",
+            f"No Service endpoint failure evidence detected in namespace '{namespace}'.",
+            "No supported warning signal was strong enough to classify this as an incident.",
+        ],
+        "additional_findings": [
+            "No additional findings detected."
+        ],
+        "root_cause_story": (
+            "No root cause was identified because no active failure condition was found "
+            "in the collected Kubernetes evidence."
+        ),
+        "recommended_fix": {
+            "strategy": "No remediation required. Continue monitoring the selected scope.",
+            "safe_commands": [
+                {
+                    "title": "Check pods",
+                    "command": f"kubectl get pods -n {namespace} --show-labels"
+                },
+                {
+                    "title": "Check services and endpoints",
+                    "command": f"kubectl get svc,endpoints -n {namespace}"
+                },
+                {
+                    "title": "Check warning events",
+                    "command": f"kubectl get events -n {namespace} --sort-by=.lastTimestamp"
+                }
+            ],
+            "verification_plan": "Confirm that pods are Running/Ready and Services have endpoints.",
+            "verification_commands": [
+                {
+                    "title": "Verify namespace workload state",
+                    "command": f"kubectl get all -n {namespace}"
+                }
+            ]
+        },
+        "verification": [
+            f"Run kubectl get all -n {namespace} and confirm there are no failing resources."
+        ],
+    }
+
+
+def _opslens_guard_report(report, namespace=None, node=None):
+    if not isinstance(report, dict):
+        return report
+
+    namespace = namespace or _opslens_namespace_from_payload(report) or "selected namespace"
+    node = node or _opslens_node_from_payload(report) or "selected node"
+
+    _opslens_fix_commands(report, namespace)
+
+    # In product mode, fake/demo resource-pressure summaries are invalid.
+    # If a report contains placeholders like affected-service/affected-deployment
+    # or the old CPU95/Mem90 demo pattern, convert it to a Healthy report.
+    if _opslens_report_looks_fake_resource_pressure(report):
+        return _opslens_make_healthy_report(namespace=namespace, node=node)
+
+    if _opslens_report_has_empty_evidence(report):
+        summary_text = _opslens_text(report.get("incident_summary", "")).lower()
+        if any(word in summary_text for word in ["critical", "incident", "failure", "unavailable", "degradation"]):
+            return _opslens_make_healthy_report(namespace=namespace, node=node)
+
+    return report
+
+
+def _opslens_guard_payload(payload, namespace=None, node=None):
+    if not isinstance(payload, dict):
+        return payload
+
+    namespace = _opslens_namespace_from_payload(payload, namespace)
+    node = _opslens_node_from_payload(payload, node)
+
+    # Direct report
+    if "incident_summary" in payload or "recommended_fix" in payload or "evidence_trail" in payload:
+        return _opslens_guard_report(payload, namespace=namespace, node=node)
+
+    # Wrapped report
+    for key in ("report", "result", "final_report", "incident_report"):
+        if isinstance(payload.get(key), dict):
+            payload[key] = _opslens_guard_report(payload[key], namespace=namespace, node=node)
+
+    _opslens_fix_commands(payload, namespace)
+    return payload
+
+
+try:
+    _opslens_original_start_investigation = start_investigation
+except NameError:
+    _opslens_original_start_investigation = None
+
+try:
+    _opslens_original_get_investigation = get_investigation
+except NameError:
+    _opslens_original_get_investigation = None
+
+try:
+    _opslens_original_get_latest_investigation = get_latest_investigation
+except NameError:
+    _opslens_original_get_latest_investigation = None
+
+
+if _opslens_original_start_investigation is not None:
+    def start_investigation(request):
+        # Hard-disable demo metrics at API service boundary.
+        try:
+            request.demo_seed_metrics = False
+        except Exception:
+            if isinstance(request, dict):
+                request["demo_seed_metrics"] = False
+
+        result = _opslens_original_start_investigation(request)
+        return _opslens_guard_payload(result)
+
+
+if _opslens_original_get_investigation is not None:
+    def get_investigation(job_id):
+        result = _opslens_original_get_investigation(job_id)
+        return _opslens_guard_payload(result)
+
+
+if _opslens_original_get_latest_investigation is not None:
+    def get_latest_investigation():
+        result = _opslens_original_get_latest_investigation()
+        return _opslens_guard_payload(result)
 

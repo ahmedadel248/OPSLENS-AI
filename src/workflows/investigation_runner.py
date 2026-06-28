@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.investigation_scope import InvestigationScope
+from src.core.report_safety import sanitize_report
 from src.core.scoped_collector import ScopedCollector
 from src.core.root_cause_facts import build_root_cause_facts
 
@@ -69,36 +70,12 @@ def cleanup_runtime_cache():
     (data_dir / ".gitkeep").touch(exist_ok=True)
 
 
-def seed_resource_anomaly(metrics_agent, node_name: str):
-    """
-    Demo-only seed.
-
-    Production path should collect real metrics instead.
-    """
-
-    base_time = datetime.now(timezone.utc) - timedelta(minutes=11)
-
-    for i in range(20):
-        metrics_agent.process_reading(
-            {
-                "timestamp": (base_time + timedelta(seconds=30 * i)).isoformat(),
-                "node_name": node_name,
-                "cpu_usage": 0.25,
-                "memory_usage": 0.10,
-            }
-        )
-
-    metrics_agent.process_reading(
-        {
-            "timestamp": (base_time + timedelta(seconds=30 * 20)).isoformat(),
-            "node_name": node_name,
-            "cpu_usage": 0.95,
-            "memory_usage": 0.90,
-        }
-    )
+def seed_resource_anomaly(*args, **kwargs):
+    """Disabled in product mode. Real resource anomalies must come from collectors/detectors."""
+    return None
 
 
-def build_agents(scope: InvestigationScope, demo_seed_metrics: bool):
+def build_agents(scope: InvestigationScope, demo_seed_metrics: bool = False):
     resource_detector = ResourceDetector(
         "artifacts/resource_detector_v7_egypt_timeaware"
     )
@@ -109,8 +86,8 @@ def build_agents(scope: InvestigationScope, demo_seed_metrics: bool):
         node_name=scope.node_name,
     )
 
-    if demo_seed_metrics:
-        seed_resource_anomaly(metrics_agent, scope.node_name)
+    # Demo metric seeding removed for product mode.
+    demo_seed_metrics = False
 
     agents = {
         "resource_metrics": metrics_agent,
@@ -137,10 +114,10 @@ def build_agents(scope: InvestigationScope, demo_seed_metrics: bool):
     return agents
 
 
-def run_investigation(scope: InvestigationScope, demo_seed_metrics: bool):
+def run_investigation(scope: InvestigationScope, demo_seed_metrics: bool = False):
     scope.validate()
 
-    agents = build_agents(scope, demo_seed_metrics)
+    agents = build_agents(scope, False)
 
     supervisor = SupervisorAgent(
         agents=agents,
@@ -157,7 +134,7 @@ def run_investigation(scope: InvestigationScope, demo_seed_metrics: bool):
     final_agent = GeminiReasoningAgent()
     final_report = final_agent.analyze(supervisor_report)
 
-    return final_report
+    return sanitize_report(final_report, namespace=scope.namespace, node=scope.node_name)
 
 
 def main():

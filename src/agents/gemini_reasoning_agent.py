@@ -1134,3 +1134,49 @@ Structured input:
 
         lines.append("")
         return "\n".join(lines)
+
+
+
+def enforce_scope_on_safe_commands(report: dict, namespace: str | None = None) -> dict:
+    """
+    Final safety guard:
+    - Do not allow namespace-scoped kubectl commands to target default
+      when the selected investigation namespace is different.
+    """
+    if not isinstance(report, dict) or not namespace or namespace == "default":
+        return report
+
+    def fix_command(cmd: str) -> str:
+        if not isinstance(cmd, str):
+            return cmd
+
+        cmd = cmd.replace("-n default", f"-n {namespace}")
+        cmd = cmd.replace("--namespace default", f"--namespace {namespace}")
+        return cmd
+
+    for key in ("safe_commands", "verification_commands", "commands"):
+        items = report.get(key)
+
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and "command" in item:
+                    item["command"] = fix_command(item["command"])
+                elif isinstance(item, str):
+                    idx = items.index(item)
+                    items[idx] = fix_command(item)
+
+    recommended_fix = report.get("recommended_fix")
+    if isinstance(recommended_fix, dict):
+        for key in ("safe_commands", "verification_commands", "commands"):
+            items = recommended_fix.get(key)
+
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict) and "command" in item:
+                        item["command"] = fix_command(item["command"])
+                    elif isinstance(item, str):
+                        idx = items.index(item)
+                        items[idx] = fix_command(item)
+
+    return report
+

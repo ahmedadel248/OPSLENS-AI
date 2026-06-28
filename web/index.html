@@ -6,99 +6,313 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpsLens AI</title>
   <link rel="stylesheet" href="/styles.css" />
+
+  <script>
+    window.__hideOpsLensSplash = function () {
+      var splash = document.getElementById("splashScreen");
+      if (!splash) return;
+      splash.classList.add("splash-hidden");
+      setTimeout(function () {
+        if (splash && splash.parentNode) splash.parentNode.removeChild(splash);
+      }, 500);
+    };
+
+    window.addEventListener("error", function (event) {
+      console.error("OpsLens UI error:", event.message);
+      window.__hideOpsLensSplash();
+    });
+
+    window.addEventListener("unhandledrejection", function (event) {
+      console.error("OpsLens async error:", event.reason);
+      window.__hideOpsLensSplash();
+    });
+
+    setTimeout(window.__hideOpsLensSplash, 2200);
+  </script>
+
 </head>
-<body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">O</div>
+
+<body class="sidebar-collapsed">
+  <div id="splashScreen" class="splash-screen">
+    <div class="opslens-mark mark-xl">
+      <span class="mark-ring"></span>
+      <span class="mark-ring mark-ring-2"></span>
+      <span class="mark-node node-a"></span>
+      <span class="mark-node node-b"></span>
+      <span class="mark-node node-c"></span>
+      <span class="mark-core"></span>
+    </div>
+    <h1>OpsLens AI</h1>
+    <p>Root cause analysis for Kubernetes incidents</p>
+    <div class="loading-track"><span></span></div>
+  </div>
+
+  <header class="topbar">
+    <div class="left-header">
+      <button id="headerMenuBtn" class="header-menu-btn" type="button" aria-label="Toggle sidebar" title="Menu">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+
+      <button class="brand nav-link" data-view="homeView" type="button">
+      <div class="opslens-mark mark-sm">
+        <span class="mark-ring"></span>
+        <span class="mark-ring mark-ring-2"></span>
+        <span class="mark-node node-a"></span>
+        <span class="mark-node node-b"></span>
+        <span class="mark-node node-c"></span>
+        <span class="mark-core"></span>
+      </div>
+      <strong>OpsLens AI</strong>
+      </button>
+    </div>
+
+    <nav class="main-nav">
+      <button class="nav-link active" data-view="homeView" type="button">Home</button>
+      <button class="nav-link" data-view="investigateView" type="button">Investigate</button>
+      <button class="nav-link" data-view="pipelineView" type="button">Pipeline</button>
+      <button class="nav-link" data-view="reportView" type="button">Reports</button>
+    </nav>
+
+    <div class="header-actions">
+      <button class="header-cta nav-link" data-view="investigateView" type="button">Start</button>
+      <button id="supportBtn" class="support-btn" type="button" aria-label="Open Help Center" title="Help Center">?</button>
+    </div>
+  </header>
+
+  <aside id="appSidebar" class="app-sidebar">
+    <div class="sidebar-inner">
+      <button class="sidebar-link active" data-view="homeView" type="button" data-label="Home" title="Home">
+        <span class="side-icon home-icon"></span>
+        <strong>Home</strong>
+      </button>
+
+      <button class="sidebar-link" data-view="investigateView" type="button" data-label="Investigate" title="Investigate">
+        <span class="side-icon investigate-icon"></span>
+        <strong>Investigate</strong>
+      </button>
+
+      <button class="sidebar-link" data-view="pipelineView" type="button" data-label="Pipeline" title="Pipeline">
+        <span class="side-icon pipeline-icon"></span>
+        <strong>Pipeline</strong>
+      </button>
+
+      <button class="sidebar-link" data-view="reportView" type="button" data-label="Reports" title="Reports">
+        <span class="side-icon reports-icon"></span>
+        <strong>Reports</strong>
+      </button>
+
+      <div class="sidebar-divider"></div>
+
+      <button class="sidebar-link" data-view="aboutView" type="button" data-label="About Us" title="About Us">
+        <span class="side-icon about-icon"></span>
+        <strong>About Us</strong>
+      </button>
+
+      <button class="sidebar-link" data-view="helpView" type="button" data-label="Help Center" title="Help Center">
+        <span class="side-icon help-icon"></span>
+        <strong>Help Center</strong>
+      </button>
+
+      <button class="sidebar-link" data-view="feedbackView" type="button" data-label="Feedback" title="Feedback">
+        <span class="side-icon feedback-icon"></span>
+        <strong>Feedback</strong>
+      </button>
+
+      <button class="sidebar-link" data-view="contactView" type="button" data-label="Contact" title="Contact">
+        <span class="side-icon contact-icon-mini"></span>
+        <strong>Contact</strong>
+      </button>
+    </div>
+  </aside>
+
+
+
+  <div id="drawerOverlay" class="drawer-overlay"></div>
+
+  <aside id="sideDrawer" class="side-drawer">
+    <div class="drawer-title">
+      <div class="drawer-brand">
+        <div class="opslens-mark mark-sm">
+          <span class="mark-ring"></span>
+          <span class="mark-ring mark-ring-2"></span>
+          <span class="mark-node node-a"></span>
+          <span class="mark-node node-b"></span>
+          <span class="mark-node node-c"></span>
+          <span class="mark-core"></span>
+        </div>
         <div>
-          <h1>OpsLens AI</h1>
-          <p>Kubernetes Incident Investigation</p>
+          <h2>OpsLens AI</h2>
+          <p>All sections</p>
         </div>
       </div>
+    </div>
 
-      <nav class="side-nav">
-        <button class="nav-btn active" data-view="dashboardView">Dashboard</button>
-        <button class="nav-btn" data-view="newInvestigationView">New Investigation</button>
-        <button class="nav-btn" data-view="pipelineView">Live Pipeline</button>
-        <button class="nav-btn" data-view="reportView">Report Details</button>
-        <button class="nav-btn" data-view="settingsView">Settings</button>
-      </nav>
+    <button class="drawer-link" data-view="homeView" type="button">
+      <span>Home</span>
+      <small>Overview and quick actions</small>
+    </button>
 
-      <section class="panel mini-panel">
-        <h2>Runtime</h2>
-        <div id="apiStatus" class="api-status">Checking API...</div>
-        <div id="jobMiniStatus" class="api-status">No job yet</div>
-      </section>
-    </aside>
+    <button class="drawer-link" data-view="investigateView" type="button">
+      <span>Investigate</span>
+      <small>Choose node, namespace, and scenario</small>
+    </button>
 
-    <main class="main">
-      <section id="dashboardView" class="view">
-        <header class="hero">
-          <div>
-            <p class="eyebrow">AIOps Console</p>
-            <h2>OpsLens Dashboard</h2>
-            <p>
-              Start a scoped Kubernetes investigation, watch agents analyze evidence,
-              and export a human-readable incident report.
-            </p>
+    <button class="drawer-link" data-view="pipelineView" type="button">
+      <span>Pipeline</span>
+      <small>Watch the investigation stages</small>
+    </button>
+
+    <button class="drawer-link" data-view="reportView" type="button">
+      <span>Reports</span>
+      <small>Read and export the RCA report</small>
+    </button>
+
+    <button class="drawer-link" data-view="aboutView" type="button">
+      <span>About Us</span>
+      <small>Project idea, service value, and how OpsLens works</small>
+    </button>
+
+    <button class="drawer-link" data-view="helpView" type="button">
+      <span>Help Center</span>
+      <small>How to use the application step by step</small>
+    </button>
+
+    <button class="drawer-link" data-view="feedbackView" type="button">
+      <span>Feedback</span>
+      <small>Send bugs, ideas, or UI notes</small>
+    </button>
+
+    <button class="drawer-link" data-view="contactView" type="button">
+      <span>Contact</span>
+      <small>Team channels and links</small>
+    </button>
+
+
+  </aside>
+
+  <div id="globalStatusBar" class="global-status-bar hidden">
+    <div>
+      <strong id="globalStatusTitle">Investigation running</strong>
+      <span id="globalStatusText">OpsLens is still analyzing the selected scope</span>
+    </div>
+    <button id="globalStatusAction" type="button">View Pipeline</button>
+  </div>
+
+  <main class="app-main">
+    <section id="homeView" class="view">
+      <section class="hero reveal scroll-motion">
+        <div class="hero-shade"></div>
+
+        <div class="hero-copy">
+          <p class="kicker">OpsLens AI</p>
+          <h1>Diagnose Kubernetes incidents faster</h1>
+          <p>
+            Choose the affected node and namespace. OpsLens analyzes Kubernetes signals and builds a focused root-cause report with verification commands
+          </p>
+
+          <div class="hero-actions">
+            <button class="primary-btn nav-link" data-view="investigateView" type="button">Start Investigation</button>
+            <button class="secondary-btn nav-link" data-view="pipelineView" type="button">See Pipeline</button>
           </div>
+        </div>
 
-          <div class="hero-card">
-            <span>Current Status</span>
-            <strong id="jobStatus">Idle</strong>
-            <small id="jobId">No job yet</small>
-          </div>
-        </header>
-
-        <section class="report-grid">
-          <div class="report-card">
-            <h3>Cluster Scope</h3>
-            <p id="clusterSummary">Loading cluster details...</p>
-          </div>
-
-          <div class="report-card">
-            <h3>Latest Investigation</h3>
-            <p id="latestSummary">No investigation has been completed in this session yet.</p>
-          </div>
-
-          <div class="report-card wide">
-            <h3>Recommended Flow</h3>
-            <div class="flow-list">
-              <span>1. Select node</span>
-              <span>2. Select relevant namespace</span>
-              <span>3. Apply scenario if needed</span>
-              <span>4. Run investigation</span>
-              <span>5. Review report</span>
-              <span>6. Export PDF / Excel</span>
+        <div class="hero-card">
+          <div class="incident-preview">
+            <span class="status-dot"></span>
+            <div>
+              <small>Example output</small>
+              <strong>Service has no endpoints because selector labels do not match backend Pods</strong>
             </div>
           </div>
-        </section>
+
+          <div class="preview-row">
+            <span>Evidence</span>
+            <strong>Service, Endpoints, Pods, Logs</strong>
+          </div>
+
+          <div class="preview-row">
+            <span>Root cause</span>
+            <strong>Selector mismatch</strong>
+          </div>
+
+          <div class="preview-row">
+            <span>Next action</span>
+            <strong>Patch selector and verify endpoints</strong>
+          </div>
+        </div>
       </section>
 
-      <section id="newInvestigationView" class="view hidden">
-        <header class="hero compact-hero">
-          <div>
-            <p class="eyebrow">New Investigation</p>
-            <h2>Investigation Setup</h2>
-            <p>Choose the node first. The namespace list will be filtered to namespaces with Pods on that node.</p>
-          </div>
-        </header>
+      <section class="content-row reveal scroll-motion">
+        <div class="row-head">
+          <h2>Start faster</h2>
+        </div>
 
-        <section class="panel form-panel">
+        <div class="tile-row">
+          <button class="action-tile nav-link" data-view="investigateView" type="button">
+            <span class="tile-mark"></span>
+            <h3>Run investigation</h3>
+            <p>Choose the scope and launch RCA analysis</p>
+          </button>
+
+          <button class="action-tile nav-link" data-view="pipelineView" type="button">
+            <span class="tile-mark"></span>
+            <h3>Watch agents</h3>
+            <p>Track collectors, agents, reasoning, and report generation</p>
+          </button>
+
+          <button class="action-tile nav-link" data-view="reportView" type="button">
+            <span class="tile-mark"></span>
+            <h3>Export report</h3>
+            <p>Download the final incident report</p>
+          </button>
+        </div>
+      </section>
+
+      <section class="content-row reveal scroll-motion">
+        <div class="row-head">
+          <h2>Why OpsLens helps</h2>
+        </div>
+
+        <div class="tile-row">
+          <article class="info-tile">
+            <h3>Less guessing</h3>
+            <p>Connect symptoms to real Kubernetes evidence</p>
+          </article>
+
+          <article class="info-tile">
+            <h3>Cleaner RCA</h3>
+            <p>Separate the main incident from extra findings</p>
+          </article>
+
+          <article class="info-tile">
+            <h3>Safer fixes</h3>
+            <p>Review commands before applying any change</p>
+          </article>
+        </div>
+      </section>
+    </section>
+
+    <section id="investigateView" class="view hidden">
+      <section class="page-head reveal scroll-motion">
+        <p class="kicker">Investigation</p>
+        <h2>Choose the Kubernetes scope</h2>
+        <p>Select the node first, then choose one of the namespaces running Pods on it</p>
+      </section>
+
+      <section class="two-col reveal scroll-motion">
+        <div class="panel-card">
           <label>
             Node
             <select id="nodeSelect"></select>
+            <p id="clusterLoadStatus" class="field-note">Loading cluster nodes...</p>
           </label>
 
           <label>
             Namespace
-            <div class="input-row">
-              <select id="namespaceSelect"></select>
-              <input id="namespaceInput" placeholder="or type namespace manually" />
-            </div>
-            <small class="hint">Namespaces shown here are filtered by Pods scheduled on the selected node.</small>
+            <select id="namespaceSelect"></select>
+            <p id="scopeInfo" class="scope-info">Select a node to load namespaces</p>
           </label>
 
           <label>
@@ -108,148 +322,431 @@
             </select>
           </label>
 
+          <div id="scenarioDetailsCard" class="scenario-details-card hidden">
+            <div>
+              <small>Scenario details</small>
+              <h3 id="scenarioTitle">No scenario selected</h3>
+            </div>
+            <p id="scenarioDescription"></p>
+            <div class="scenario-meta">
+              <span id="scenarioImpact"></span>
+              <span id="scenarioExpected"></span>
+            </div>
+          </div>
+
           <div class="checks">
             <label class="check">
               <input type="checkbox" id="applyScenario" checked />
               Apply selected scenario
             </label>
 
-            <label class="check danger">
-              <input type="checkbox" id="resetNamespace" />
-              Reset namespace first
-            </label>
-
             <label class="check">
               <input type="checkbox" id="demoMetrics" checked />
-              Demo metrics anomaly
+              Include resource anomaly check
             </label>
           </div>
 
           <label>
-            Wait after scenario apply
+            Wait after apply
             <input id="waitSeconds" type="number" min="0" max="180" value="45" />
           </label>
 
-          <button id="runBtn" class="primary-btn">Run Investigation</button>
-        </section>
+          <button id="runBtn" class="primary-btn full" type="button">Launch Analysis</button>
+        </div>
+
+        <aside class="side-note">
+          <h3>Focused scope</h3>
+          <p>The selected scope is passed to all collectors and agents</p>
+
+          <div class="mini-steps">
+            <span>Scope</span>
+            <span>Collect</span>
+            <span>Detect</span>
+            <span>Report</span>
+          </div>
+        </aside>
+      </section>
+    </section>
+
+    <section id="pipelineView" class="view hidden">
+      <section class="page-head reveal scroll-motion">
+        <p class="kicker">Pipeline</p>
+        <h2>Follow the investigation</h2>
+        <p id="pipelineHint">Waiting for an investigation</p>
       </section>
 
-      <section id="pipelineView" class="view hidden">
-        <header class="hero compact-hero">
-          <div>
-            <p class="eyebrow">Live Pipeline</p>
-            <h2>Agent Execution</h2>
-            <p id="pipelineHint">Waiting for investigation.</p>
-          </div>
-        </header>
-
-        <section class="pipeline-card">
-          <div id="pipeline" class="pipeline"></div>
-        </section>
+      <section class="pipeline-panel reveal scroll-motion">
+        <div id="pipeline" class="pipeline"></div>
       </section>
 
-      <section id="reportView" class="view hidden">
-        <header class="hero compact-hero">
-          <div>
-            <p class="eyebrow">Report Details</p>
-            <h2 id="reportTitle">No report yet</h2>
-            <p>Review the final RCA, additional findings, safe commands, and verification plan.</p>
-          </div>
+      <section class="timeline-panel reveal scroll-motion">
+        <h3>Timeline</h3>
+        <div id="timelineLog" class="timeline-log">
+          <p class="muted">No activity yet</p>
+        </div>
+      </section>
+    </section>
 
-          <div class="hero-card">
-            <span>Export</span>
+    <section id="reportView" class="view hidden">
+      <section class="page-head report-head reveal scroll-motion">
+        <div>
+          <p class="kicker">Reports</p>
+          <h2 id="reportTitle">No report yet</h2>
+          <p>Run an investigation to generate the RCA report</p>
+        </div>
+
+        <div class="export-card">
+          <label>
+            Export
             <select id="downloadFormat">
               <option value="pdf">PDF</option>
               <option value="xlsx">Excel</option>
               <option value="markdown">Markdown</option>
               <option value="json">JSON</option>
             </select>
-            <button id="downloadReportBtn" class="secondary-btn">Download</button>
+          </label>
+          <div class="export-actions">
+            <button id="copySummaryBtn" class="secondary-btn" type="button">Copy Summary</button>
+            <button id="downloadReportBtn" class="secondary-btn" type="button">Download</button>
           </div>
-        </header>
-
-        <section id="reportSection" class="report-grid hidden">
-          <div class="report-card overview">
-            <div class="badges">
-              <span id="severityBadge" class="badge">severity</span>
-              <span id="confidenceBadge" class="badge">confidence</span>
-            </div>
-            <h3>Incident Summary</h3>
-            <p id="incidentSummary"></p>
-          </div>
-
-          <div class="report-card wide">
-            <h3>Primary Root Cause</h3>
-            <p id="rootCause"></p>
-          </div>
-
-          <div class="report-card">
-            <h3>Evidence Trail</h3>
-            <div id="evidenceTrail" class="table-wrap"></div>
-          </div>
-
-          <div class="report-card">
-            <h3>Additional Findings</h3>
-            <div id="additionalFindings" class="table-wrap"></div>
-          </div>
-
-          <div class="report-card wide">
-            <h3>Recommended Fix</h3>
-            <p id="fixStrategy"></p>
-            <div id="actions"></div>
-          </div>
-
-          <div class="report-card wide">
-            <h3>Safe Commands</h3>
-            <div id="commands"></div>
-          </div>
-
-          <div class="report-card wide">
-            <h3>Verification Plan</h3>
-            <p id="verificationIntent"></p>
-            <div id="verificationCommands"></div>
-          </div>
-        </section>
-
-        <section id="emptyState" class="empty-state">
-          <div class="orb"></div>
-          <h3>No report yet</h3>
-          <p>Run an investigation first, then the report will appear here.</p>
-        </section>
+        </div>
       </section>
 
-      <section id="settingsView" class="view hidden">
-        <header class="hero compact-hero">
+      <section class="records-panel reveal scroll-motion">
+        <div class="records-head">
           <div>
-            <p class="eyebrow">Settings</p>
-            <h2>Runtime Settings</h2>
-            <p>Current V1 safety settings for local investigation runs.</p>
+            <p class="kicker">Records</p>
+            <h3>Investigation history</h3>
           </div>
-        </header>
-
-        <section class="report-grid">
-          <div class="report-card">
-            <h3>Safety Mode</h3>
-            <p>OpsLens recommends safe commands only. It does not execute remediation commands automatically from the UI.</p>
-          </div>
-
-          <div class="report-card">
-            <h3>Protected Namespaces</h3>
-            <p>default, kube-system, kube-public, kube-node-lease cannot be reset from the UI.</p>
-          </div>
-
-          <div class="report-card wide">
-            <h3>Future Auto-Scope Mode</h3>
-            <p>
-              In the next version, the user can open OpsLens from an affected app/pod.
-              OpsLens will infer namespace, node, workload, and service automatically from that launch context.
-            </p>
-          </div>
-        </section>
+          <button id="refreshHistoryBtn" class="secondary-btn" type="button">Refresh history</button>
+        </div>
+        <div id="investigationRecords" class="records-list">
+          <p class="muted">No recorded investigations yet.</p>
+        </div>
       </section>
-    </main>
-  </div>
+
+      <section id="emptyState" class="empty-state reveal scroll-motion">
+        <div class="opslens-mark mark-md">
+          <span class="mark-ring"></span>
+          <span class="mark-ring mark-ring-2"></span>
+          <span class="mark-node node-a"></span>
+          <span class="mark-node node-b"></span>
+          <span class="mark-node node-c"></span>
+          <span class="mark-core"></span>
+        </div>
+        <h3>No report generated yet</h3>
+        <p>Start an investigation first</p>
+      </section>
+
+      <section id="reportSection" class="report-grid hidden">
+        <article id="incidentStoryPanel" class="story-panel wide reveal scroll-motion">
+          <div class="story-head">
+            <p class="kicker">Incident Story</p>
+            <h3>From symptom to fix</h3>
+          </div>
+          <div id="storySteps" class="story-steps"></div>
+        </article>
+        <article class="report-card wide reveal scroll-motion">
+          <div class="badges">
+            <span id="severityBadge" class="badge">severity</span>
+            <span id="confidenceBadge" class="badge">confidence</span>
+          </div>
+          <h3>Incident Summary</h3>
+          <p id="incidentSummary"></p>
+        </article>
+
+        <article class="report-card wide reveal scroll-motion">
+          <h3>Primary Root Cause</h3>
+          <p id="rootCause"></p>
+        </article>
+
+        <article class="report-card reveal scroll-motion">
+          <h3>Evidence Trail</h3>
+          <div id="evidenceTrail" class="table-wrap"></div>
+        </article>
+
+        <article class="report-card reveal scroll-motion">
+          <h3>Additional Findings</h3>
+          <div id="additionalFindings" class="table-wrap"></div>
+        </article>
+
+        <article class="report-card wide reveal scroll-motion">
+          <h3>Recommended Fix</h3>
+          <p id="fixStrategy"></p>
+          <div id="actions"></div>
+        </article>
+
+        <article class="report-card wide reveal scroll-motion">
+          <h3>Safe Commands</h3>
+          <div id="commands"></div>
+        </article>
+
+        <article class="report-card wide reveal scroll-motion">
+          <h3>Verification Plan</h3>
+          <p id="verificationIntent"></p>
+          <div id="verificationCommands"></div>
+        </article>
+      </section>
+    </section>
+
+    <section id="aboutView" class="view hidden">
+      <section class="about-hero reveal scroll-motion">
+        <div>
+          <p class="kicker">About Us</p>
+          <h2>OpsLens AI is an incident investigator for Kubernetes teams</h2>
+          <p>
+            We built OpsLens to help operators understand why a Kubernetes service failed without jumping between
+            kubectl outputs, logs, events, metrics, and scattered notes.
+          </p>
+        </div>
+
+        <div class="about-highlight">
+          <strong>Goal</strong>
+          <p>Turn operational noise into a clear root-cause story with evidence, recommended action, and verification steps.</p>
+        </div>
+      </section>
+
+      <section class="about-wide-grid reveal scroll-motion">
+        <article class="about-wide-card">
+          <span>01</span>
+          <h3>The problem we solve</h3>
+          <p>
+            A production incident rarely points to one obvious source. A Service may have no endpoints, a Pod may fail,
+            logs may show connection errors, and metrics may show pressure at the same time. OpsLens connects those
+            signals and separates the real cause from secondary findings.
+          </p>
+        </article>
+
+        <article class="about-wide-card">
+          <span>02</span>
+          <h3>What we provide</h3>
+          <p>
+            OpsLens provides a focused investigation workflow: scope selection, evidence collection, specialized agents,
+            Supervisor correlation, LLM explanation, safe remediation commands, and exportable incident reports.
+          </p>
+        </article>
+
+        <article class="about-wide-card">
+          <span>03</span>
+          <h3>Why it matters</h3>
+          <p>
+            The user does not need to manually connect every Kubernetes symptom. OpsLens explains what failed, why it
+            likely failed, what evidence supports that conclusion, and what should be checked next.
+          </p>
+        </article>
+      </section>
+
+      <section class="about-process reveal scroll-motion">
+        <h3>How OpsLens thinks during an incident</h3>
+
+        <div class="about-process-line">
+          <div>
+            <strong>Scope</strong>
+            <p>Node and namespace</p>
+          </div>
+
+          <div>
+            <strong>Evidence</strong>
+            <p>Services, Pods, Events, Logs, Metrics</p>
+          </div>
+
+          <div>
+            <strong>Correlation</strong>
+            <p>Supervisor Agent</p>
+          </div>
+
+          <div>
+            <strong>Reasoning</strong>
+            <p>Root-cause story</p>
+          </div>
+
+          <div>
+            <strong>Action</strong>
+            <p>Safe commands and verification</p>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section id="feedbackView" class="view hidden">
+      <section class="page-head reveal scroll-motion">
+        <p class="kicker">Feedback</p>
+        <h2>Tell us what to improve</h2>
+        <p>Send bugs, feature ideas, UI notes, or report quality feedback</p>
+      </section>
+
+      <section class="two-col reveal scroll-motion">
+        <form id="feedbackForm" class="panel-card">
+          <label>
+            Name
+            <input id="feedbackName" placeholder="Your name" />
+          </label>
+
+          <label>
+            Email
+            <input id="feedbackEmail" placeholder="Optional email" />
+          </label>
+
+          <label>
+            Type
+            <select id="feedbackType">
+              <option value="ui">UI feedback</option>
+              <option value="bug">Bug</option>
+              <option value="feature">Feature request</option>
+              <option value="report_quality">Report quality</option>
+              <option value="general">General</option>
+            </select>
+          </label>
+
+          <label>
+            Rating
+            <select id="feedbackRating">
+              <option value="">No rating</option>
+              <option value="5">5 - Excellent</option>
+              <option value="4">4 - Good</option>
+              <option value="3">3 - Okay</option>
+              <option value="2">2 - Needs work</option>
+              <option value="1">1 - Poor</option>
+            </select>
+          </label>
+
+          <label>
+            Message
+            <textarea id="feedbackMessage" minlength="2" rows="6" placeholder="Write your feedback..."></textarea>
+          </label>
+
+          <button class="primary-btn full" type="submit">Submit Feedback</button>
+          <p id="feedbackStatus" class="form-status"></p>
+        </form>
+
+        <aside class="side-note">
+          <h3>Useful feedback</h3>
+          <p>Tell us what was confusing, slow, ugly, missing, or unclear in the report</p>
+        </aside>
+      </section>
+    </section>
+
+    <section id="helpView" class="view hidden">
+      <section class="page-head reveal scroll-motion">
+        <p class="kicker">Help Center</p>
+        <h2>How to use OpsLens</h2>
+        <p>Follow these steps when testing a scenario or presenting the application.</p>
+      </section>
+
+      <section class="tile-row reveal scroll-motion">
+        <article class="info-tile">
+          <h3>1. Start your cluster</h3>
+          <p>Make sure Minikube is running and kubectl can read nodes, namespaces, and pods.</p>
+        </article>
+
+        <article class="info-tile">
+          <h3>2. Open Investigate</h3>
+          <p>Select a node first, then choose a namespace that has Pods running on that node.</p>
+        </article>
+
+        <article class="info-tile">
+          <h3>3. Choose a scenario</h3>
+          <p>Apply an incident scenario when you want a controlled test case for the presentation.</p>
+        </article>
+      </section>
+
+      <section class="tile-row reveal scroll-motion">
+        <article class="info-tile">
+          <h3>4. Launch analysis</h3>
+          <p>OpsLens runs collectors, agents, Supervisor reasoning, and report generation.</p>
+        </article>
+
+        <article class="info-tile">
+          <h3>5. Review the report</h3>
+          <p>Read the problem, evidence, root cause, recommended fix, and verification plan.</p>
+        </article>
+
+        <article class="info-tile">
+          <h3>6. Export result</h3>
+          <p>Download the report as PDF, Excel, Markdown, or JSON for submission or presentation.</p>
+        </article>
+      </section>
+
+      <section class="help-errors reveal scroll-motion">
+        <h3>Common errors</h3>
+
+        <div class="help-error-list">
+          <div>
+            <strong>No nodes found</strong>
+            <p>Run minikube status and kubectl get nodes.</p>
+          </div>
+
+          <div>
+            <strong>No namespaces for selected node</strong>
+            <p>Check kubectl get pods -A -o wide and confirm Pods are scheduled on that node.</p>
+          </div>
+
+          <div>
+            <strong>Scenario did not apply</strong>
+            <p>Check the FastAPI terminal logs and verify the scenario YAML exists.</p>
+          </div>
+
+          <div>
+            <strong>LLM report failed</strong>
+            <p>Make sure GEMINI_API_KEY is set before starting uvicorn.</p>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section id="contactView" class="view hidden">
+      <section class="page-head reveal scroll-motion">
+        <p class="kicker">Contact</p>
+        <h2>Team channels</h2>
+        <p>Final links will be added before release</p>
+      </section>
+
+      <section class="contact-grid reveal scroll-motion">
+        <button class="contact-card disabled" type="button">
+          <span class="contact-icon"></span>
+          <small>Email</small>
+          <strong>contact@opslens.ai</strong>
+        </button>
+
+        <button class="contact-card disabled" type="button">
+          <span class="contact-icon"></span>
+          <small>GitHub</small>
+          <strong>github.com/opslens-ai</strong>
+        </button>
+
+        <button class="contact-card disabled" type="button">
+          <span class="contact-icon"></span>
+          <small>LinkedIn</small>
+          <strong>linkedin.com/company/opslens-ai</strong>
+        </button>
+
+        <button class="contact-card disabled" type="button">
+          <span class="contact-icon"></span>
+          <small>Facebook</small>
+          <strong>facebook.com/opslensai</strong>
+        </button>
+
+        <button class="contact-card disabled" type="button">
+          <span class="contact-icon"></span>
+          <small>X</small>
+          <strong>x.com/opslensai</strong>
+        </button>
+      </section>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <span>&copy; 2026 OpsLens AI Team. All rights reserved</span>
+    <span>Version 1.0.0 | Release 2026</span>
+  </footer>
+
+  <div id="toastHost" class="toast-host"></div>
 
   <script src="/app.js"></script>
+
+<div class="opslens-product-disclaimer">
+  OpsLens can make mistakes. Verify evidence and safe commands before applying changes.
+</div>
+
 </body>
 </html>

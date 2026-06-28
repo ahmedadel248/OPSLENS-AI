@@ -58,3 +58,91 @@ project_core_files.txt
 
 # Keep model runtime files in artifacts.
 # Do not ignore artifacts/resource_detector_v7_egypt_timeaware/
+
+# OpsLens generated runtime files
+archive/
+web/_backup_*/
+data/opslens.db
+data/live/
+reports/*.pdf
+reports/*.xlsx
+reports/*_export.*
+__pycache__/
+*.pyc
+
+# OpsLens local backups / runtime files
+archive/
+web/_backup_*/
+web/_backup_*
+data/opslens.db
+data/*.db
+data/live/
+__pycache__/
+*.pyc
+
+# OpsLens local archive/runtime
+archive/
+data/opslens.db
+data/*.db
+data/live/
+reports/*
+!reports/.gitkeep
+web/_backup_*/
+web/_backup_*
+__pycache__/
+*.pyc
+
+# OpsLens archive/runtime generated files
+archive/
+data/opslens.db
+data/*.db
+data/*.jsonl
+data/live/
+data/final_incident_reports/*
+!data/final_incident_reports/.gitkeep
+data/incident_reports/*
+!data/incident_reports/.gitkeep
+data/feedback/*
+!data/feedback/.gitkeep
+reports/*
+!reports/.gitkeep
+scenarios/*
+!scenarios/.gitkeep
+web/_backup_*/
+web/_backup_*
+project_inventory_for_cleanup.txt
+__pycache__/
+*.pyc
+
+# Local only
+venv/
+.env
+archive/
+scripts/
+__pycache__/
+*.pyc
+
+# Runtime DB and generated files
+data/opslens.db
+data/*.db
+data/*.jsonl
+data/live/
+
+data/final_incident_reports/*
+!data/final_incident_reports/.gitkeep
+
+data/incident_reports/*
+!data/incident_reports/.gitkeep
+
+data/feedback/*
+!data/feedback/.gitkeep
+
+reports/*
+!reports/.gitkeep
+
+scenarios/*
+!scenarios/.gitkeep
+
+web/_backup_*/
+web/_backup_*
+project_inventory_*.txt
