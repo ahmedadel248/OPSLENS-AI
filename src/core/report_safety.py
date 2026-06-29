@@ -83,21 +83,79 @@ def _has_invalid_placeholders(report: dict[str, Any], namespace: str | None) -> 
     return False
 
 
+def _is_no_finding_marker(value: Any) -> bool:
+    text = _text(value).strip().lower()
+
+    if not text:
+        return True
+
+    no_finding_markers = {
+        "no data available",
+        "no evidence available",
+        "not available",
+        "unavailable",
+        "none",
+        "[]",
+        "{}",
+        "no additional findings detected.",
+        "no additional findings detected",
+        "no evidence rows available.",
+        "no evidence rows available",
+    }
+
+    return text in no_finding_markers
+
+
 def _has_no_evidence(report: dict[str, Any]) -> bool:
-    evidence = (
-        report.get("evidence_trail")
-        or report.get("evidence")
-        or report.get("timeline")
-        or report.get("investigation_evidence")
-    )
+    """
+    Decide only whether the report has any real collected evidence.
 
-    findings = (
-        report.get("additional_findings")
-        or report.get("additional_issues")
-        or report.get("secondary_findings")
-    )
+    Important:
+    Runtime incidents may not always use evidence_trail.
+    They can appear through:
+    - agent_reasoning
+    - primary_signal
+    - primary_incident_group
+    - incident_groups
+    - supporting_signals
+    - root_cause_facts
+    - important_evidence
 
-    return _empty(evidence) and _empty(findings)
+    If any of those exist, do NOT convert the report to Healthy.
+    """
+
+    evidence_candidates = [
+        report.get("evidence_trail"),
+        report.get("evidence"),
+        report.get("timeline"),
+        report.get("investigation_evidence"),
+        report.get("agent_reasoning"),
+        report.get("important_evidence"),
+        report.get("primary_signal"),
+        report.get("primary_incident"),
+        report.get("primary_incident_group"),
+        report.get("incident_groups"),
+        report.get("supporting_signals"),
+        report.get("root_cause_facts"),
+    ]
+
+    finding_candidates = [
+        report.get("additional_findings"),
+        report.get("additional_issues"),
+        report.get("secondary_findings"),
+        report.get("separate_findings"),
+        report.get("unclassified_findings"),
+    ]
+
+    for item in evidence_candidates:
+        if not _is_no_finding_marker(item):
+            return False
+
+    for item in finding_candidates:
+        if not _is_no_finding_marker(item):
+            return False
+
+    return True
 
 
 def make_healthy_report(namespace: str | None, node: str | None) -> dict[str, Any]:
@@ -155,9 +213,13 @@ def make_healthy_report(namespace: str | None, node: str | None) -> dict[str, An
                 }
             ],
         },
-        "verification": [
-            f"Run kubectl get all -n {namespace} and confirm there are no failing resources."
-        ],
+        "verification": {
+            "intent": f"Run kubectl get all -n {namespace} and confirm there are no failing resources.",
+            "commands": [
+                f"kubectl get all -n {namespace}",
+                f"kubectl get events -n {namespace} --sort-by=.lastTimestamp",
+            ],
+        },
     }
 
 

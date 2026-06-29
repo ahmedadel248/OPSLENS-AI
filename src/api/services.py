@@ -296,9 +296,23 @@ def _run_job(job_id: str, request: InvestigationRequest) -> None:
         stop_ticker.set()
         _set_all_remaining(job_id, "done")
 
+        finished_at = datetime.now().isoformat()
+
+        final_report = dict(final_report)
+        final_report["job_id"] = job_id
+        final_report["__opslens_job_id"] = job_id
+        final_report["created_at"] = JOBS[job_id].get("created_at") or final_report.get("created_at") or finished_at
+        final_report["finished_at"] = finished_at
+        final_report["source_scenario"] = request.scenario_name
+
+        try:
+            api_history_store.save_report(final_report, record_id=job_id)
+        except Exception as save_exc:
+            JOBS[job_id]["history_save_error"] = f"{type(save_exc).__name__}: {save_exc}"
+
         JOBS[job_id]["status"] = "completed"
         JOBS[job_id]["report"] = final_report
-        JOBS[job_id]["finished_at"] = datetime.now().isoformat()
+        JOBS[job_id]["finished_at"] = finished_at
 
     except Exception as exc:
         stop_ticker.set()
@@ -1259,17 +1273,31 @@ def _opslens_report_looks_fake_resource_pressure(report):
 
 
 def _opslens_report_has_empty_evidence(report):
+    """
+    Treat structured OpsLens signals as real evidence.
+    Runtime incidents often arrive through agent_reasoning / primary_signal /
+    incident_groups instead of evidence_trail.
+    """
     evidence = (
         report.get("evidence_trail")
         or report.get("evidence")
         or report.get("timeline")
         or report.get("investigation_evidence")
+        or report.get("agent_reasoning")
+        or report.get("important_evidence")
+        or report.get("primary_signal")
+        or report.get("primary_incident_group")
+        or report.get("incident_groups")
+        or report.get("supporting_signals")
+        or report.get("root_cause_facts")
     )
 
     additional = (
         report.get("additional_findings")
         or report.get("additional_issues")
         or report.get("secondary_findings")
+        or report.get("separate_findings")
+        or report.get("unclassified_findings")
     )
 
     return _opslens_is_empty_evidence(evidence) and _opslens_is_empty_evidence(additional)
@@ -1417,3 +1445,130 @@ if _opslens_original_get_latest_investigation is not None:
         result = _opslens_original_get_latest_investigation()
         return _opslens_guard_payload(result)
 
+# =========================================================
+# OpsLens final job persistence v3
+# =========================================================
+# OpsLens final job persistence v3
+# Keeps active investigation visible after browser refresh.
+# =========================================================
+
+JOBS_DIR = LIVE_DIR / "jobs"
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _opslens_job_path(job_id: str) -> Path:
+    safe_id = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(job_id))
+    return JOBS_DIR / f"{safe_id}.json"
+
+
+def _opslens_persist_job(job_id: str) -> None:
+    try:
+        job = JOBS.get(job_id)
+        if not job:
+            return
+
+        payload = dict(job)
+        payload["persisted_at"] = datetime.now().isoformat()
+
+        _opslens_job_path(job_id).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _opslens_load_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
+    path = _opslens_job_path(job_id)
+
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _opslens_latest_job_snapshot() -> Optional[Dict[str, Any]]:
+    try:
+        files = sorted(JOBS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        return None
+
+    for path in files:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+    return None
+
+
+_opslens_original_set_stage = _set_stage
+_opslens_original_set_all_remaining = _set_all_remaining
+_opslens_original_run_job = _run_job
+_opslens_original_start_job = start_investigation_job
+_opslens_original_get_job = get_job
+_opslens_original_get_latest_job = get_latest_job
+
+
+def _set_stage(job_id: str, key: str, status: str) -> None:
+    _opslens_original_set_stage(job_id, key, status)
+    _opslens_persist_job(job_id)
+
+
+def _set_all_remaining(job_id: str, status: str) -> None:
+    _opslens_original_set_all_remaining(job_id, status)
+    _opslens_persist_job(job_id)
+
+
+def _run_job(job_id: str, request: InvestigationRequest) -> None:
+    _opslens_persist_job(job_id)
+
+    try:
+        _opslens_original_run_job(job_id, request)
+    finally:
+        _opslens_persist_job(job_id)
+
+
+def start_investigation_job(request: InvestigationRequest) -> Dict[str, Any]:
+    result = _opslens_original_start_job(request)
+
+    try:
+        job_id = result.get("job_id")
+        if job_id:
+            _opslens_persist_job(job_id)
+    except Exception:
+        pass
+
+    return result
+
+
+def get_job(job_id: str) -> Dict[str, Any]:
+    if job_id in JOBS:
+        return JOBS[job_id]
+
+    snapshot = _opslens_load_job_snapshot(job_id)
+
+    if snapshot:
+        status = str(snapshot.get("status", "")).lower()
+
+        if status in {"queued", "running"}:
+            snapshot["status"] = "failed"
+            snapshot["error"] = (
+                "The browser was refreshed after the job snapshot was saved, "
+                "but the backend worker is no longer active. Start the investigation again."
+            )
+            snapshot["finished_at"] = snapshot.get("finished_at") or datetime.now().isoformat()
+
+        return snapshot
+
+    return _opslens_original_get_job(job_id)
+
+
+def get_latest_job() -> Optional[Dict[str, Any]]:
+    if JOBS:
+        return list(JOBS.values())[-1]
+
+    return _opslens_latest_job_snapshot()

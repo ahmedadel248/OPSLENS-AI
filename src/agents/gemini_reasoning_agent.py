@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -188,6 +188,12 @@ Important:
 - A Service with empty endpoints can be caused by a selector mismatch even when unrelated pods are failing elsewhere.
 - ImagePullBackOff and CrashLoopBackOff are additional findings unless the affected Service actually selects those pods.
 - Metrics anomalies are operational context unless selected as the primary root cause.
+- Use Supervisor incident grouping if provided:
+  - primary_incident_group = confirmed main incident chain
+  - separate_findings = independent follow-up issues
+  - unclassified_findings = abnormal signals requiring hypotheses and verification
+- Do not merge findings only because they share the same namespace.
+- Possible causes for unclassified findings must be clearly labeled as hypotheses.
 
 You must produce:
 1. title
@@ -400,7 +406,35 @@ Structured input:
             ],
         }
 
-        compact["additional_findings"] = self._extract_additional_findings(compact)
+        for key in [
+            "primary_incident_group",
+            "incident_groups",
+            "separate_findings",
+            "unclassified_findings",
+            "incident_grouping_policy",
+        ]:
+            if key in supervisor_report:
+                compact[key] = supervisor_report.get(key)
+
+        supervisor_additional = supervisor_report.get("additional_findings") or []
+        if supervisor_additional:
+            compact["additional_findings"] = supervisor_additional
+        else:
+            compact["additional_findings"] = self._extract_additional_findings(compact)
+
+        constraints = compact.get("constraints") or []
+        constraints.extend(
+            [
+                "Use Supervisor incident_groups as the authoritative grouping.",
+                "Signals inside primary_incident_group should be explained as one incident chain.",
+                "Signals inside separate_findings must be listed separately and must not be merged into the primary root cause.",
+                "Signals inside unclassified_findings require possible causes only as hypotheses, not confirmed causes.",
+                "Same namespace alone is not evidence of causality.",
+                "Do not convert possible causes into confirmed root causes.",
+            ]
+        )
+        compact["constraints"] = list(dict.fromkeys(constraints))
+
         return compact
 
     def _sanitize_report(self, report: Dict[str, Any], compact_input: Dict[str, Any]) -> Dict[str, Any]:
@@ -410,10 +444,35 @@ Structured input:
         facts = compact_input.get("root_cause_facts") or {}
         root_type = facts.get("root_cause_type") or (compact_input.get("primary_signal") or {}).get("anomaly_type")
 
-        namespace = affected.get("namespace", "default")
-        service = affected.get("service", "")
-        deployment = affected.get("deployment", "")
-        node = affected.get("node", "")
+        primary_signal = compact_input.get("primary_signal") or {}
+
+        namespace = (
+            affected.get("namespace")
+            or primary_signal.get("namespace")
+            or "default"
+        )
+        service = (
+            affected.get("service")
+            or affected.get("service_name")
+            or primary_signal.get("service_name")
+            or primary_signal.get("service")
+            or ""
+        )
+        deployment = (
+            affected.get("deployment")
+            or affected.get("deployment_name")
+            or primary_signal.get("deployment_name")
+            or primary_signal.get("deployment")
+            or ""
+        )
+        node = (
+            affected.get("node")
+            or affected.get("node_name")
+            or primary_signal.get("node_name")
+            or primary_signal.get("node")
+            or ""
+        )
+        pod = primary_signal.get("pod_name") or primary_signal.get("pod") or ""
 
         if root_type in {"ServiceSelectorMismatch", "EmptyServiceEndpoints", "EmptyEndpoints"}:
             if "worker" in str(deployment).lower():
@@ -436,13 +495,50 @@ Structured input:
                 "ImagePullBackOff and CrashLoopBackOff findings in other workloads are important follow-up issues, but they are not treated as the direct cause of this Service's empty endpoints unless evidence proves the Service selects those Pods."
             )
         else:
-            report["title"] = report.get("title") or compact_input.get("incident_title") or "OpsLens Incident Report"
+            resource_display = deployment or pod or service or "selected workload"
+            root_display = root_type or "KubernetesRuntimeIncident"
 
-            if "incident_summary" not in report:
-                report["incident_summary"] = report.get("problem_description", "")
+            report["title"] = (
+                report.get("title")
+                or compact_input.get("incident_title")
+                or f"{root_display} detected on {resource_display}"
+            )
 
-            if "root_cause_story" not in report:
-                report["root_cause_story"] = report.get("root_cause_analysis", "")
+            current_summary = str(report.get("incident_summary") or report.get("problem_description") or "").strip()
+            current_root = str(report.get("root_cause_story") or report.get("root_cause_analysis") or "").strip()
+
+            if not current_summary or "no active incident" in current_summary.lower():
+                report["incident_summary"] = (
+                    f"OpsLens detected {root_display} in namespace '{namespace}'"
+                    + (f" affecting deployment '{deployment}'" if deployment else "")
+                    + (f" / pod '{pod}'" if pod else "")
+                    + ". This is an active workload/runtime failure collected from Kubernetes and agent evidence."
+                )
+            else:
+                report["incident_summary"] = current_summary
+
+            runtime_stories = {
+                "CrashLoopBackOff": "The workload is repeatedly starting and exiting, so Kubernetes restarts the container and the deployment cannot become healthy.",
+                "DeploymentNoAvailableReplicas": "The deployment has no available replicas, which means the expected workload is not serving successfully.",
+                "ImagePullBackOff": "Kubernetes cannot pull the container image, so the pod cannot start.",
+                "ErrImagePull": "Kubernetes failed to pull the configured container image.",
+                "MissingImagePullSecret": "The workload appears to require image pull credentials that are missing or invalid.",
+                "PythonTraceback": "Application logs show a Python exception, indicating an application runtime failure.",
+                "ImportError": "Application startup failed because a required Python module or import could not be resolved.",
+                "FatalError": "Application logs contain a fatal startup/runtime error.",
+                "ConnectionRefused": "Application logs show that a dependency or service connection was refused.",
+                "TimeoutError": "Application logs show dependency timeout behavior.",
+                "OOMKilled": "The container was killed because it exceeded its memory limit.",
+            }
+
+            if not current_root or "no root cause" in current_root.lower():
+                report["root_cause_story"] = runtime_stories.get(
+                    root_type,
+                    f"The primary root cause is {root_display} on {resource_display}. "
+                    "OpsLens selected this from the collected Kubernetes/log/config evidence."
+                )
+            else:
+                report["root_cause_story"] = current_root
 
         report["severity"] = report.get("severity") or compact_input.get("severity", "unknown")
         report["confidence"] = report.get("confidence") or compact_input.get("confidence", "medium")
@@ -453,6 +549,36 @@ Structured input:
             "node": node,
         }
         report["root_cause_facts"] = facts
+
+        if not report.get("evidence_trail"):
+            evidence_rows = []
+
+            primary = compact_input.get("primary_signal") or {}
+            if primary:
+                evidence_rows.append(
+                    primary.get("summary")
+                    or primary.get("message")
+                    or f"{primary.get('anomaly_type', 'Primary signal')} selected as primary incident evidence."
+                )
+
+            for item in compact_input.get("important_evidence", []) or []:
+                if len(evidence_rows) >= 8:
+                    break
+                evidence_rows.append(str(item))
+
+            for signal in compact_input.get("supporting_signals", []) or []:
+                if len(evidence_rows) >= 8:
+                    break
+                if isinstance(signal, dict):
+                    evidence_rows.append(
+                        signal.get("summary")
+                        or signal.get("message")
+                        or signal.get("anomaly_type")
+                        or str(signal)
+                    )
+
+            if evidence_rows:
+                report["evidence_trail"] = evidence_rows
 
         additional_findings = self._normalize_additional_findings(
             report.get("additional_findings") or compact_input.get("additional_findings") or []
@@ -514,6 +640,16 @@ Structured input:
             ),
             "commands": verification_commands[:6],
         }
+
+        for key in [
+            "primary_incident_group",
+            "incident_groups",
+            "separate_findings",
+            "unclassified_findings",
+            "incident_grouping_policy",
+        ]:
+            if key in compact_input:
+                report[key] = compact_input.get(key)
 
         return report
 

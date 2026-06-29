@@ -1,4 +1,4 @@
-﻿import time
+import time
 from datetime import datetime, timezone
 from typing import Dict, Iterator, Optional
 
@@ -135,5 +135,114 @@ class KubernetesMetricsCollector:
             if limit is None or count < limit:
                 time.sleep(self.poll_interval_seconds)
 
+# =========================================================
+# OpsLens final pod metrics collection patch
+# =========================================================
+# OpsLens final pod metrics collection patch
+# Adds pod-level CPU/memory metrics from metrics.k8s.io.
+# =========================================================
+
+_KMC_original_init = KubernetesMetricsCollector.__init__
+_KMC_original_collect_once = KubernetesMetricsCollector.collect_once
 
 
+def _kmc_init(self, *args, namespace=None, all_namespaces=True, pod_high_cpu_cores=0.8, **kwargs):
+    self.namespace = namespace
+    self.all_namespaces = all_namespaces
+    self.pod_high_cpu_cores = float(pod_high_cpu_cores)
+    _KMC_original_init(self, *args, **kwargs)
+
+
+def _kmc_pod_node_map(self):
+    mapping = {}
+
+    try:
+        if getattr(self, "namespace", None) and not getattr(self, "all_namespaces", True):
+            pods = self.core_v1.list_namespaced_pod(self.namespace)
+        else:
+            pods = self.core_v1.list_pod_for_all_namespaces()
+
+        for pod in pods.items:
+            namespace = pod.metadata.namespace
+            name = pod.metadata.name
+            mapping[(namespace, name)] = {
+                "node_name": pod.spec.node_name,
+                "phase": pod.status.phase,
+                "labels": pod.metadata.labels or {},
+            }
+    except Exception:
+        pass
+
+    return mapping
+
+
+def _kmc_collect_pod_metrics_once(self):
+    mapping = _kmc_pod_node_map(self)
+
+    if getattr(self, "namespace", None) and not getattr(self, "all_namespaces", True):
+        payload = self.custom_api.list_namespaced_custom_object(
+            group="metrics.k8s.io",
+            version="v1beta1",
+            namespace=self.namespace,
+            plural="pods",
+        )
+    else:
+        payload = self.custom_api.list_cluster_custom_object(
+            group="metrics.k8s.io",
+            version="v1beta1",
+            plural="pods",
+        )
+
+    rows = []
+
+    for item in payload.get("items", []) or []:
+        metadata = item.get("metadata") or {}
+        namespace = metadata.get("namespace")
+        pod_name = metadata.get("name")
+
+        info = mapping.get((namespace, pod_name), {})
+        node_name = info.get("node_name")
+
+        if self.node_name and node_name and node_name != self.node_name:
+            continue
+
+        cpu_cores = 0.0
+        memory_bytes = 0.0
+
+        for container in item.get("containers", []) or []:
+            usage = container.get("usage") or {}
+            cpu_cores += self._parse_cpu_to_cores(str(usage.get("cpu", "0")))
+            memory_bytes += self._parse_memory_to_bytes(str(usage.get("memory", "0")))
+
+        rows.append({
+            "timestamp": self._now_utc(),
+            "namespace": namespace,
+            "pod_name": pod_name,
+            "node_name": node_name,
+            "phase": info.get("phase"),
+            "cpu_cores": float(cpu_cores),
+            "cpu_millicores": float(cpu_cores * 1000),
+            "memory_bytes": float(memory_bytes),
+            "memory_mib": float(memory_bytes / (1024 ** 2)),
+            "high_cpu": bool(cpu_cores >= getattr(self, "pod_high_cpu_cores", 0.8)),
+            "pod_high_cpu_cores_threshold": getattr(self, "pod_high_cpu_cores", 0.8),
+        })
+
+    return rows
+
+
+def _kmc_collect_once(self):
+    result = _KMC_original_collect_once(self)
+
+    try:
+        result["pod_metrics"] = _kmc_collect_pod_metrics_once(self)
+    except Exception as exc:
+        result["pod_metrics"] = []
+        result["pod_metrics_error"] = f"{type(exc).__name__}: {exc}"
+
+    return result
+
+
+KubernetesMetricsCollector.__init__ = _kmc_init
+KubernetesMetricsCollector.collect_once = _kmc_collect_once
+KubernetesMetricsCollector.collect_pod_metrics_once = _kmc_collect_pod_metrics_once

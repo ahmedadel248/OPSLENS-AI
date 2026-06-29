@@ -1,7 +1,9 @@
-﻿import json
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from src.core.incident_grouping import build_incident_grouping, related_supporting_events
 
 
 class SupervisorAgent:
@@ -130,6 +132,11 @@ class SupervisorAgent:
 
             return report
 
+        grouping = build_incident_grouping(
+            all_events=all_events,
+            primary_event=primary_event,
+        )
+
         report = {
             "report_type": "clean_incident_report",
             "scenario_name": scenario_name,
@@ -154,6 +161,13 @@ class SupervisorAgent:
                 self._compact_signal(event)
                 for event in supporting_events
             ],
+
+            "primary_incident_group": grouping.get("primary_incident_group"),
+            "incident_groups": grouping.get("incident_groups", []),
+            "separate_findings": grouping.get("separate_findings", []),
+            "unclassified_findings": grouping.get("unclassified_findings", []),
+            "additional_findings": grouping.get("additional_findings", []),
+            "incident_grouping_policy": grouping.get("incident_grouping_policy", {}),
 
             "trigger_event": trigger_event,
         }
@@ -232,56 +246,14 @@ class SupervisorAgent:
         events: List[Dict[str, Any]],
         primary_event: Optional[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        if not primary_event:
-            return []
+        # Evidence-based supporting selection.
+        # Same namespace alone is not enough to classify a signal as supporting.
+        return related_supporting_events(
+            events=events,
+            primary_event=primary_event,
+            limit=8,
+        )
 
-        primary_key = self._event_identity(primary_event)
-
-        primary_namespace = primary_event.get("namespace")
-        primary_node = primary_event.get("node_name")
-        primary_pod = primary_event.get("pod_name")
-        primary_service = primary_event.get("service_name")
-        primary_deployment = primary_event.get("deployment_name")
-
-        supporting = []
-
-        for event in events:
-            if self._event_identity(event) == primary_key:
-                continue
-
-            if primary_service and event.get("service_name") == primary_service:
-                supporting.append(event)
-                continue
-
-            if primary_deployment and event.get("deployment_name") == primary_deployment:
-                supporting.append(event)
-                continue
-
-            if primary_pod and event.get("pod_name") == primary_pod:
-                supporting.append(event)
-                continue
-
-            if primary_node and event.get("node_name") == primary_node:
-                supporting.append(event)
-                continue
-
-            if primary_namespace and event.get("namespace") == primary_namespace:
-                related_types = {
-                    "EmptyServiceEndpoints",
-                    "DeploymentNoAvailableReplicas",
-                    "ConnectionRefused",
-                    "PythonTraceback",
-                    "ErrImagePull",
-                    "ImagePullBackOff",
-                    "CrashLoopBackOff",
-                    "Unhealthy",
-                    "KubernetesWarningEvent",
-                }
-
-                if event.get("anomaly_type") in related_types:
-                    supporting.append(event)
-
-        return supporting[:6]
 
     def _event_identity(self, event: Dict[str, Any]) -> tuple:
         return (

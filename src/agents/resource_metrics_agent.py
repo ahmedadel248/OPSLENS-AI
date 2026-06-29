@@ -1,4 +1,4 @@
-﻿import json
+import json
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -327,5 +327,139 @@ def _resource_metrics_run(self):
 ResourceMetricsAgent.__init__ = _resource_metrics_init
 ResourceMetricsAgent.run = _resource_metrics_run
 
+# =========================================================
+# OpsLens final live pod pressure patch
+# =========================================================
+# OpsLens final live pod pressure patch
+# Detects high pod CPU immediately from metrics-server.
+# =========================================================
+
+_RMA_original_analyze_node = ResourceMetricsAgent.analyze_node
 
 
+def _rma_build_high_pod_cpu_result(self, node_name, pod_metric, reading):
+    namespace = pod_metric.get("namespace")
+    pod_name = pod_metric.get("pod_name")
+    cpu_cores = float(pod_metric.get("cpu_cores") or 0.0)
+    cpu_millicores = float(pod_metric.get("cpu_millicores") or cpu_cores * 1000)
+    threshold = float(pod_metric.get("pod_high_cpu_cores_threshold") or 0.8)
+
+    severity = "critical" if cpu_cores >= 1.5 else "high"
+
+    event = {
+        "source_agent": "resource_metrics_agent",
+        "agent": "metrics_agent",
+        "event_type": "resource_anomaly",
+        "anomaly_type": "HighPodCPU",
+        "severity": severity,
+        "node_name": node_name,
+        "namespace": namespace,
+        "pod_name": pod_name,
+        "timestamp": reading.get("timestamp") or pod_metric.get("timestamp"),
+        "summary": (
+            f"Pod {pod_name} in namespace {namespace} is consuming high CPU: "
+            f"{cpu_millicores:.0f}m on node {node_name}."
+        ),
+        "metrics": {
+            "cpu_cores": cpu_cores,
+            "cpu_millicores": cpu_millicores,
+            "memory_mib": pod_metric.get("memory_mib"),
+            "threshold_cpu_cores": threshold,
+            "node_cpu_usage": reading.get("cpu_usage"),
+            "node_memory_usage": reading.get("memory_usage"),
+        },
+        "evidence": [
+            f"kubectl top pod equivalent: {pod_name} CPU {cpu_millicores:.0f}m",
+            f"High pod CPU threshold: {threshold * 1000:.0f}m",
+            f"Node: {node_name}",
+            f"Namespace: {namespace}",
+        ],
+        "recommendations": [
+            "Inspect the pod process or workload generating high CPU.",
+            "Check resource requests and limits for this deployment.",
+            "Check whether the high CPU pod is related to the primary incident or is a separate noisy-neighbor finding.",
+        ],
+        "raw_signal": {
+            "pod_metric": pod_metric,
+            "node_reading": reading,
+        },
+    }
+
+    return {
+        "status": "anomaly",
+        "agent": "metrics_agent",
+        "node_name": node_name,
+        "resource_anomaly": True,
+        "cpu_anomaly": True,
+        "memory_anomaly": False,
+        "anomaly_type": "HighPodCPU",
+        "anomaly_types": ["pod_cpu_anomaly"],
+        "severity": severity,
+        "actual_cpu": cpu_cores,
+        "actual_cpu_millicores": cpu_millicores,
+        "threshold_cpu_cores": threshold,
+        "summary": event["summary"],
+        "event": event,
+        "evidence": event["evidence"],
+        "recommendations": event["recommendations"],
+        "metrics": event["metrics"],
+    }
+
+
+def _rma_live_pod_pressure(self, node_name):
+    collector = getattr(self, "collector", None)
+
+    if collector is None or not hasattr(collector, "collect_once"):
+        return None
+
+    try:
+        reading = collector.collect_once()
+    except Exception:
+        return None
+
+    try:
+        buffer = self.buffers[node_name]
+        buffer.append(reading)
+
+        self._persist_history(
+            reading=reading,
+            result={
+                "status": "live_sample",
+                "agent": "metrics_agent",
+                "node_name": node_name,
+            },
+            buffer=list(buffer),
+        )
+    except Exception:
+        pass
+
+    pod_metrics = reading.get("pod_metrics") or []
+
+    candidates = []
+
+    for pod_metric in pod_metrics:
+        metric_node = pod_metric.get("node_name")
+
+        if metric_node and metric_node != node_name:
+            continue
+
+        if pod_metric.get("high_cpu"):
+            candidates.append(pod_metric)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: float(item.get("cpu_cores") or 0.0), reverse=True)
+    return _rma_build_high_pod_cpu_result(self, node_name, candidates[0], reading)
+
+
+def _rma_analyze_node(self, node_name):
+    live_result = _rma_live_pod_pressure(self, node_name)
+
+    if live_result:
+        return live_result
+
+    return _RMA_original_analyze_node(self, node_name)
+
+
+ResourceMetricsAgent.analyze_node = _rma_analyze_node

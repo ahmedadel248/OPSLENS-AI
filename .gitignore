@@ -146,3 +146,23 @@ scenarios/*
 web/_backup_*/
 web/_backup_*
 project_inventory_*.txt
+
+# OpsLens local/generated files
+.env.*
+!.env.example
+data/*.sqlite
+data/health_checks/*
+data/reports/*
+data/exports/*
+!data/**/.gitkeep
+backups/
+_project_archive/
+*.bak*
+OpsLens-AI.txt
+PROJECT_FILE_LIST.txt
+PATCH_*.py
+TEST_*.py
+PRINT_*.py
+DIRECT_GROUPING_CHECK.py
+CLEAN_PROJECT_SAFE.py
+CREATE_DEMO_SCENARIOS.py

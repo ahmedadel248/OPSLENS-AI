@@ -1,4 +1,4 @@
-﻿from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class KubernetesSignalDetector:
@@ -561,5 +561,220 @@ class KubernetesSignalDetector:
 
         return unique_signals
 
+# =========================================================
+# OpsLens final readiness/deployment signal patch
+# =========================================================
+# OpsLens final readiness/deployment signal patch
+# Detects ReadinessProbeFailed, DeploymentUnavailable, and PodNotReady.
+# =========================================================
+
+_KSD_original_init = KubernetesSignalDetector.__init__
+_KSD_original_detect = KubernetesSignalDetector.detect
 
 
+def _ksd_init(self, *args, **kwargs):
+    _KSD_original_init(self, *args, **kwargs)
+
+    self.severity_by_reason.update({
+        "ReadinessProbeFailed": "critical",
+        "DeploymentUnavailable": "critical",
+        "PodNotReady": "warning",
+        "Unhealthy": "warning",
+    })
+
+    self.recommendations_by_reason.update({
+        "ReadinessProbeFailed": [
+            "Describe the affected pod and inspect readiness probe configuration.",
+            "Check whether the probe path, port, and application endpoint are correct.",
+            "Check application logs and service route for HTTP status failures.",
+        ],
+        "DeploymentUnavailable": [
+            "Check deployment rollout status.",
+            "Describe the deployment and pods.",
+            "Inspect readiness probes, pod conditions, and recent events.",
+        ],
+        "PodNotReady": [
+            "Describe the pod and inspect Ready condition.",
+            "Check readiness probe failures and container logs.",
+        ],
+    })
+
+
+def _ksd_is_readiness_probe_event(event):
+    reason = str(event.get("reason") or "")
+    message = str(event.get("message") or "").lower()
+    return reason == "Unhealthy" and "readiness probe failed" in message
+
+
+def _ksd_detect_readiness_warning_events(self, events):
+    signals = []
+
+    for event in events or []:
+        if event.get("type") != "Warning":
+            continue
+
+        if not _ksd_is_readiness_probe_event(event):
+            continue
+
+        involved = event.get("involved_object") or {}
+        namespace = involved.get("namespace") or (event.get("metadata") or {}).get("namespace")
+        object_kind = involved.get("kind")
+        object_name = involved.get("name")
+
+        if self._is_excluded_namespace(namespace):
+            continue
+
+        signals.append(
+            self._build_signal(
+                signal="ReadinessProbeFailed",
+                category="readiness_probe",
+                severity=self._severity("ReadinessProbeFailed"),
+                namespace=namespace,
+                pod_name=object_name if object_kind == "Pod" else None,
+                summary=f"Readiness probe failed on {object_kind}/{object_name}.",
+                evidence=[
+                    f"Object: {object_kind}/{object_name}",
+                    f"Reason: {event.get('reason')}",
+                    f"Message: {event.get('message')}",
+                ],
+                raw={
+                    "event_type": event.get("type"),
+                    "reason": event.get("reason"),
+                    "message": event.get("message"),
+                    "object_kind": object_kind,
+                    "object_name": object_name,
+                },
+            )
+        )
+
+    return signals
+
+
+def _ksd_detect_pod_readiness(self, k8s_data):
+    signals = []
+
+    for pod in k8s_data.get("pods", []) or []:
+        metadata = pod.get("metadata") or {}
+        status = pod.get("status") or {}
+        spec = pod.get("spec") or {}
+
+        namespace = metadata.get("namespace") or k8s_data.get("namespace")
+        pod_name = metadata.get("name")
+        node_name = spec.get("node_name")
+
+        if self._is_excluded_namespace(namespace):
+            continue
+
+        conditions = status.get("conditions") or []
+
+        for condition in conditions:
+            if condition.get("type") != "Ready":
+                continue
+
+            if condition.get("status") == "True":
+                continue
+
+            reason = condition.get("reason") or "NotReady"
+            message = condition.get("message") or ""
+
+            signals.append(
+                self._build_signal(
+                    signal="PodNotReady",
+                    category="pod_readiness",
+                    severity=self._severity("PodNotReady"),
+                    namespace=namespace,
+                    pod_name=pod_name,
+                    node_name=node_name,
+                    summary=f"Pod {pod_name} is running but not Ready.",
+                    evidence=[
+                        f"Ready condition: {condition.get('status')}",
+                        f"Reason: {reason}",
+                        f"Message: {message}",
+                        f"Pod phase: {status.get('phase')}",
+                    ],
+                    raw={
+                        "ready_condition": condition,
+                        "phase": status.get("phase"),
+                    },
+                )
+            )
+
+    return signals
+
+
+def _ksd_detect_deployment_availability(self, k8s_data):
+    signals = []
+
+    for deployment in k8s_data.get("deployments", []) or []:
+        metadata = deployment.get("metadata") or {}
+        spec = deployment.get("spec") or {}
+        status = deployment.get("status") or {}
+
+        namespace = metadata.get("namespace") or k8s_data.get("namespace")
+        deployment_name = metadata.get("name")
+
+        if self._is_excluded_namespace(namespace):
+            continue
+
+        desired = int(spec.get("replicas") or 0)
+        ready = int(status.get("ready_replicas") or 0)
+        available = int(status.get("available_replicas") or 0)
+        unavailable = int(status.get("unavailable_replicas") or max(desired - available, 0))
+
+        if desired <= 0:
+            continue
+
+        if ready >= desired and available >= desired:
+            continue
+
+        signals.append(
+            self._build_signal(
+                signal="DeploymentUnavailable",
+                category="deployment_availability",
+                severity=self._severity("DeploymentUnavailable"),
+                namespace=namespace,
+                summary=f"Deployment {deployment_name} is unavailable: ready {ready}/{desired}, available {available}/{desired}.",
+                evidence=[
+                    f"Desired replicas: {desired}",
+                    f"Ready replicas: {ready}",
+                    f"Available replicas: {available}",
+                    f"Unavailable replicas: {unavailable}",
+                ],
+                raw={
+                    "deployment_name": deployment_name,
+                    "desired_replicas": desired,
+                    "ready_replicas": ready,
+                    "available_replicas": available,
+                    "unavailable_replicas": unavailable,
+                },
+            )
+        )
+
+    return signals
+
+
+def _ksd_detect(self, k8s_data):
+    signals = _KSD_original_detect(self, k8s_data)
+
+    events = k8s_data.get("events", []) or []
+
+    # Remove generic Unhealthy readiness events; replace with explicit ReadinessProbeFailed.
+    cleaned = []
+    for signal in signals:
+        raw = signal.get("raw") or {}
+        if (
+            signal.get("signal") == "Unhealthy"
+            and str(raw.get("message") or "").lower().find("readiness probe failed") >= 0
+        ):
+            continue
+        cleaned.append(signal)
+
+    cleaned.extend(_ksd_detect_readiness_warning_events(self, events))
+    cleaned.extend(_ksd_detect_pod_readiness(self, k8s_data))
+    cleaned.extend(_ksd_detect_deployment_availability(self, k8s_data))
+
+    return self._deduplicate(cleaned)
+
+
+KubernetesSignalDetector.__init__ = _ksd_init
+KubernetesSignalDetector.detect = _ksd_detect

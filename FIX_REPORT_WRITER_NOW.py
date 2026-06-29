@@ -1,4 +1,11 @@
-from __future__ import annotations
+﻿from pathlib import Path
+
+path = Path("src/utils/report_writer.py")
+
+if not path.exists():
+    raise SystemExit("ERROR: src/utils/report_writer.py not found")
+
+path.write_text(r'''from __future__ import annotations
 
 import csv
 import html
@@ -507,3 +514,6 @@ class ReportWriter:
             "pdf_path": self.save_pdf(reports_list, f"incident_report_{stamp}.pdf"),
             "total_reports": len(reports_list),
         }
+''', encoding="utf-8")
+
+print("DONE: src/utils/report_writer.py replaced with clean OpsLens writer.")

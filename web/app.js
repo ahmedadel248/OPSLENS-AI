@@ -5,6 +5,7 @@ let currentJobId = null;
 let currentReport = null;
 let pollTimer = null;
 let scenarioDetailsFromApi = {};
+let allScenariosFromApi = [];
 
 
 const SCENARIO_DETAILS = {
@@ -316,24 +317,56 @@ async function loadScenarioDetails() {
   }
 }
 
+
+function scenarioNamespaceFromName(name) {
+  const lower = String(name || "").toLowerCase();
+
+  if (lower.includes("payments")) return "opslens-payments";
+  if (lower.includes("orders")) return "opslens-orders";
+  if (lower.includes("platform")) return "opslens-platform";
+
+  return "";
+}
+
+function renderScenarioOptionsForNamespace() {
+  if (!scenarioSelect) return;
+
+  const selectedNamespace = namespaceValue ? namespaceValue() : "";
+  const previousValue = scenarioSelect.value;
+
+  scenarioSelect.innerHTML = "";
+  scenarioSelect.appendChild(option("", "No scenario"));
+
+  const filtered = (allScenariosFromApi || []).filter((scenario) => {
+    if (!scenario) return false;
+    if (String(scenario).startsWith("_setup/")) return false;
+
+    const scenarioNamespace = scenarioNamespaceFromName(scenario);
+
+    if (!selectedNamespace) return true;
+    if (!scenarioNamespace) return true;
+
+    return scenarioNamespace === selectedNamespace;
+  });
+
+  filtered.forEach((scenario) => scenarioSelect.appendChild(option(scenario)));
+
+  if (filtered.includes(previousValue)) {
+    scenarioSelect.value = previousValue;
+  }
+
+  updateScenarioDetails();
+}
+
+
 async function loadScenarios() {
   scenarioSelect.innerHTML = "";
   scenarioSelect.appendChild(option("", "Loading scenarios..."));
 
   try {
     const scenarios = await api("/api/scenarios");
-    const list = scenarios.scenarios || [];
-
-    scenarioSelect.innerHTML = "";
-    scenarioSelect.appendChild(option("", "No scenario"));
-
-    list.forEach((scenario) => scenarioSelect.appendChild(option(scenario)));
-
-    if (list.includes("multi_issue_k8s_chaos.yml")) {
-      scenarioSelect.value = "multi_issue_k8s_chaos.yml";
-    }
-
-    updateScenarioDetails();
+    allScenariosFromApi = scenarios.scenarios || [];
+    renderScenarioOptionsForNamespace();
   } catch (error) {
     scenarioSelect.innerHTML = "";
     scenarioSelect.appendChild(option("", "Could not load scenarios"));
@@ -461,7 +494,10 @@ async function loadNamespacesForSelectedNode() {
 
 nodeSelect.addEventListener("change", loadNamespacesForSelectedNode);
 scenarioSelect.addEventListener("change", updateScenarioDetails);
-namespaceSelect.addEventListener("change", updateScopeInfo);
+namespaceSelect.addEventListener("change", () => {
+  updateScopeInfo();
+  renderScenarioOptionsForNamespace();
+});
 
 function namespaceValue() {
   return namespaceSelect.value;
@@ -559,8 +595,8 @@ async function runInvestigation() {
     namespace: namespaceValue(),
     scenario_name: scenarioSelect.value || null,
     apply_scenario: applyScenario.checked && Boolean(scenarioSelect.value),
-    reset_namespace: false,
-    demo_seed_metrics: false,
+    reset_namespace: resetNamespace ? resetNamespace.checked : false,
+    demo_seed_metrics: demoMetrics ? demoMetrics.checked : false,
     wait_seconds: Number(waitSeconds.value || 45),
   };
 
@@ -621,12 +657,13 @@ async function pollJob() {
       runBtn.textContent = "Launch Analysis";
 
       currentReport = job.report || {};
+      currentReport.job_id = job.job_id || currentJobId || currentReport.job_id || "";
+      currentReport.__opslens_job_id = currentReport.job_id;
+      currentReport.created_at = currentReport.created_at || job.created_at || new Date().toISOString();
       localStorage.removeItem("opslens_active_job_id");
 
       renderReport(currentReport);
-      saveCurrentReportToDatabase(currentReport);
-      saveInvestigationRecord(job, currentReport);
-      renderInvestigationRecords();
+      await loadBackendInvestigationHistory();
       setGlobalStatus("Investigation completed", "The RCA report is ready.", "View Report", () => {
         clearGlobalStatus();
         showView("reportView");
@@ -664,9 +701,6 @@ async function pollJob() {
 }
 
 function renderReport(report) {
-  cacheReportLocally(report);
-  saveCurrentReportToDatabase(report);
-
   emptyState.classList.add("hidden");
   reportSection.classList.remove("hidden");
 
@@ -679,6 +713,7 @@ function renderReport(report) {
   renderIncidentStory(report);
   renderEvidence(report.agent_reasoning || []);
   renderAdditional(report.additional_findings || []);
+  renderIncidentGrouping(report);
   renderFix(report.recommended_fix || {});
   renderVerification(report.verification || {});
 }
@@ -832,17 +867,6 @@ function renderCommands(container, list) {
   });
 }
 
-downloadReportBtn.addEventListener("click", () => {
-  const format = downloadFormat.value || "pdf";
-
-  if (currentJobId) {
-    window.location.href = `/api/investigations/${currentJobId}/report/${format}/download`;
-    return;
-  }
-
-  window.location.href = `/api/reports/latest/${format}/download`;
-});
-
 feedbackForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
@@ -929,22 +953,8 @@ function restoreGlobalStatus() {
 
 
 
-async function saveCurrentReportToDatabase(report) {
-  if (!report || !report.title) return null;
-
-  try {
-    const saved = await api("/api/db/reports/save", {
-      method: "POST",
-      body: JSON.stringify(report),
-    });
-
-    await loadBackendInvestigationHistory();
-    return saved;
-  } catch (error) {
-    console.warn("Could not save report to database:", error);
-    showToast("Report not saved", "The report is visible, but database save failed.");
-    return null;
-  }
+async function saveCurrentReportToDatabase() {
+  return null;
 }
 
 function showToast(title, message, actionLabel = null, action = null) {
@@ -1022,8 +1032,7 @@ function renderInvestigationRecords() {
   if (!records.length) {
     if (currentReport && currentReport.title) {
       investigationRecords.innerHTML = `<p class="muted">Saving current report into history...</p>`;
-      saveCurrentReportToDatabase(currentReport);
-      return;
+          return;
     }
 
     investigationRecords.innerHTML = `<p class="muted">No recorded investigations yet.</p>`;
@@ -1066,10 +1075,24 @@ if (clearRecordsBtn) {
   });
 }
 
-function restoreActiveJobPolling() {
+async function restoreActiveJobPolling() {
   const activeJobId = localStorage.getItem("opslens_active_job_id");
 
   if (!activeJobId || currentJobId) return;
+
+  try {
+    await api(`/api/investigations/${encodeURIComponent(activeJobId)}`);
+  } catch (error) {
+    // Backend jobs are in-memory. After uvicorn restarts, old job IDs no longer exist.
+    // Do not keep polling a dead job forever.
+    localStorage.removeItem("opslens_active_job_id");
+    localStorage.removeItem("opslens_global_status");
+    currentJobId = null;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    clearGlobalStatus();
+    return;
+  }
 
   currentJobId = activeJobId;
 
@@ -1092,120 +1115,161 @@ runBtn.addEventListener("click", runInvestigation);
 
 bootstrap();
 
-
 // =========================================================
-// Backend investigation history
+// OpsLens WEB FINAL controller
+// Backend-only history, no local report cache, resilient polling,
+// toast-only notifications, and safe downloads.
 // =========================================================
 
-async function loadBackendInvestigationHistory() {
-  if (!investigationRecords) return;
+function showToast(title, message, actionLabel = null, action = null, type = "info") {
+  if (!toastHost) return;
 
-  investigationRecords.innerHTML = `<p class="muted">Loading investigation history...</p>`;
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type} clickable-toast`;
 
+  toast.innerHTML = `
+    <div>
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(message || "")}</p>
+    </div>
+    ${actionLabel ? `<button type="button">${escapeHtml(actionLabel)}</button>` : ""}
+  `;
+
+  let closed = false;
+
+  function closeToast() {
+    if (closed) return;
+    closed = true;
+    toast.classList.add("toast-hide");
+    setTimeout(() => toast.remove(), 350);
+  }
+
+  if (actionLabel && action) {
+    const button = toast.querySelector("button");
+    if (button) {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        action();
+        closeToast();
+      });
+    }
+  }
+
+  toast.addEventListener("click", closeToast);
+  toastHost.appendChild(toast);
+
+  setTimeout(closeToast, 7000);
+}
+
+function normalizeReport(value) {
+  if (!value) return null;
+
+  if (typeof value === "string") {
+    try {
+      return normalizeReport(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+
+  if (typeof value !== "object") return null;
+
+  if (value.report && typeof value.report === "object") return value.report;
+  if (typeof value.report === "string") return normalizeReport(value.report);
+
+  return value;
+}
+
+function reportAffected(report) {
+  return (report && report.affected_resources && typeof report.affected_resources === "object")
+    ? report.affected_resources
+    : {};
+}
+
+function reportServiceName(report) {
+  const affected = reportAffected(report);
+  return (
+    affected.service ||
+    affected.service_name ||
+    affected.workload ||
+    affected.deployment ||
+    affected.pod ||
+    "unknown-service"
+  );
+}
+
+function reportCreatedStamp(record) {
+  const raw = record.created_at || record.finished_at || record.modified_at || "";
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? raw : date.toLocaleString();
+}
+
+function stableHistoryFingerprint(record) {
+  const parts = [
+    record.title || "",
+    record.namespace || "",
+    record.service || "",
+    record.node || "",
+    record.severity || "",
+    record.summary || "",
+    record.root_cause || "",
+    record.fix_strategy || "",
+  ];
+
+  return parts.map((part) => String(part).trim().toLowerCase()).join("||");
+}
+
+function clearFrontendHistoryCache() {
   try {
-    const result = await api("/api/db/history");
-    await await renderBackendInvestigationRecords(result.records || []);
-  } catch (error) {
-    investigationRecords.innerHTML = `
-      <div class="history-error">
-        <strong>Could not load backend history</strong>
-        <p>${escapeHtml(error.message)}</p>
-      </div>
-    `;
-  }
+    [
+      "opslens_cached_reports",
+      "opslens_cached_reports_v2",
+      "opslens_investigation_records"
+    ].forEach((key) => localStorage.removeItem(key));
+  } catch {}
 }
 
-async function renderBackendInvestigationRecords(records) {
-  if (!investigationRecords) return;
-
-  if (!records.length) {
-    investigationRecords.innerHTML = `<p class="muted">No recorded investigations yet.</p>`;
-    return;
-  }
-
-  investigationRecords.innerHTML = records.map((record) => {
-    const date = new Date(record.modified_at || record.created_at);
-    const stamp = Number.isNaN(date.getTime())
-      ? (record.created_at || "")
-      : date.toLocaleString();
-
-    return `
-      <div class="record-card backend-record" data-record-id="${escapeHtml(record.record_id)}">
-        <div>
-          <strong>${escapeHtml(record.service || "unknown-service")}</strong>
-          <p>${escapeHtml(record.title || "OpsLens Investigation")}</p>
-        </div>
-        <div>
-          <small>Namespace</small>
-          <span>${escapeHtml(record.namespace || "unknown")}</span>
-        </div>
-        <div>
-          <small>Severity</small>
-          <span>${escapeHtml(record.severity || "unknown")}</span>
-        </div>
-        <div>
-          <small>Created</small>
-          <span>${escapeHtml(stamp)}</span>
-        </div>
-        <div class="record-actions">
-          <button type="button" class="open-record-btn" data-record-id="${escapeHtml(record.record_id)}">Open</button>
-          <button type="button" class="download-record-btn" data-record-id="${escapeHtml(record.record_id)}">PDF</button>
-        </div>
-      </div>
-    `;
-  }).join("");
-
-  investigationRecords.querySelectorAll(".open-record-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const recordId = btn.dataset.recordId;
-      const report = await api(`/api/db/history/${encodeURIComponent(recordId)}`);
-      currentReport = report;
-      currentJobId = null;
-      renderReport(report);
-      showView("reportView");
-    });
-  });
-
-  investigationRecords.querySelectorAll(".download-record-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const recordId = btn.dataset.recordId;
-      window.location.href = `/api/db/history/${encodeURIComponent(recordId)}/report/pdf/download`;
-    });
-  });
+function getCachedReports() {
+  return [];
 }
 
-// Override old localStorage renderer
-function renderInvestigationRecords() {
-  loadBackendInvestigationHistory();
-}
-
-// Keep local save no-op because backend history is based on saved report files
-function saveInvestigationRecord(job, report) {
+function cacheReportLocally() {
   return;
 }
 
-if (refreshHistoryBtn) {
-  refreshHistoryBtn.addEventListener("click", loadBackendInvestigationHistory);
+function restoreLatestCachedReport() {
+  return;
 }
 
-if (clearRecordsBtn) {
-  clearRecordsBtn.style.display = "none";
+async function saveCurrentReportToDatabase() {
+  return null;
 }
 
+function getInvestigationRecords() {
+  return [];
+}
+
+function saveInvestigationRecord() {
+  return;
+}
+
+function renderInvestigationRecords() {
+  return loadBackendInvestigationHistory();
+}
 
 function buildReportSummaryText(report) {
   if (!report) return "";
 
   const fix = report.recommended_fix || {};
   const verification = report.verification || {};
-  const affected = report.affected_resources || {};
+  const affected = reportAffected(report);
 
   return [
     `Title: ${report.title || "OpsLens Incident Report"}`,
     `Severity: ${report.severity || "unknown"}`,
     `Confidence: ${report.confidence || "unknown"}`,
     `Namespace: ${affected.namespace || "unknown"}`,
-    `Node: ${affected.node || "unknown"}`,
+    `Node: ${affected.node || affected.node_name || "unknown"}`,
     `Service: ${affected.service || affected.service_name || "unknown"}`,
     "",
     `Summary: ${report.incident_summary || ""}`,
@@ -1215,85 +1279,173 @@ function buildReportSummaryText(report) {
     `Recommended Fix: ${fix.strategy || ""}`,
     "",
     `Verification: ${verification.intent || ""}`,
-  ].join("\\n");
+  ].join("\n");
 }
 
-if (copySummaryBtn) {
-  copySummaryBtn.addEventListener("click", async () => {
-    if (!currentReport) {
-      showToast("No report available", "Run or open an investigation report first.");
-      return;
-    }
-
-    await navigator.clipboard.writeText(buildReportSummaryText(currentReport));
-    showToast("Summary copied", "The report summary is now in your clipboard.");
-  });
+function setRunButtonRunning(isRunning) {
+  if (!runBtn) return;
+  runBtn.disabled = Boolean(isRunning);
+  runBtn.textContent = isRunning ? "Analysis running..." : "Launch Analysis";
 }
 
+function finishActiveJob() {
+  localStorage.removeItem("opslens_active_job_id");
+  localStorage.removeItem("opslens_active_job_started_at");
+  localStorage.removeItem("opslens_active_pipeline_stage");
+  currentJobId = null;
+  setRunButtonRunning(false);
+}
 
-// =========================================================
-// Local cache for last 10 reports
-// =========================================================
+async function runInvestigation() {
+  const payload = {
+    node_name: nodeSelect ? nodeSelect.value : "",
+    namespace: namespaceValue ? namespaceValue() : "",
+    scenario_name: scenarioSelect ? (scenarioSelect.value || null) : null,
+    apply_scenario: Boolean(applyScenario && applyScenario.checked && scenarioSelect && scenarioSelect.value),
+    reset_namespace: resetNamespace ? resetNamespace.checked : false,
+    demo_seed_metrics: demoMetrics ? demoMetrics.checked : false,
+    wait_seconds: waitSeconds ? Number(waitSeconds.value || 45) : 45,
+  };
 
-function getCachedReports() {
+  if (!payload.node_name || !payload.namespace) {
+    showToast(
+      "Missing investigation scope",
+      "Please choose both a node and a namespace before launching the investigation.",
+      null,
+      null,
+      "warning"
+    );
+    return;
+  }
+
+  setRunButtonRunning(true);
+  showView("pipelineView");
+  setGlobalStatus("Investigation running", "OpsLens is analyzing the selected scope.", "View Pipeline", () => showView("pipelineView"));
+
   try {
-    return JSON.parse(localStorage.getItem("opslens_cached_reports") || "[]");
-  } catch {
-    return [];
+    const job = await api("/api/investigations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    currentJobId = job.job_id;
+    localStorage.setItem("opslens_active_job_id", currentJobId);
+
+    setPipelineHint(job);
+    renderPipeline(job.stages);
+
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollJob, 1200);
+
+    showToast("Investigation started", "OpsLens is collecting evidence from the selected scope.", null, null, "info");
+  } catch (error) {
+    finishActiveJob();
+    clearGlobalStatus();
+    showToast("Could not start investigation", error.message || String(error), null, null, "error");
   }
 }
 
-function cacheReportLocally(report) {
-  if (!report || !report.title) return;
+async function handleCompletedJob(job, notify = true) {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
 
-  const affected = report.affected_resources || {};
-  const service =
-    affected.service ||
-    affected.service_name ||
-    affected.workload ||
-    affected.deployment ||
-    affected.pod ||
-    "unknown-service";
+  currentReport = normalizeReport(job.report) || {};
+  currentReport.job_id = job.job_id || currentJobId || currentReport.job_id || "";
+  currentReport.__opslens_job_id = currentReport.__opslens_job_id || currentReport.job_id;
+  currentReport.created_at = currentReport.created_at || job.created_at || new Date().toISOString();
+  currentReport.finished_at = currentReport.finished_at || job.finished_at || new Date().toISOString();
 
-  const cacheId = `${service}_${Date.now()}`;
-
-  const cached = {
-    cache_id: cacheId,
-    cached_at: new Date().toISOString(),
-    title: report.title || "OpsLens Incident Report",
-    service,
-    namespace: affected.namespace || "",
-    node: affected.node || "",
-    severity: report.severity || "unknown",
-    confidence: report.confidence || "unknown",
-    report,
-  };
-
-  const current = getCachedReports();
-
-  const next = [
-    cached,
-    ...current.filter((item) => item.title !== cached.title || item.service !== cached.service),
-  ].slice(0, 10);
-
-  localStorage.setItem("opslens_cached_reports", JSON.stringify(next));
-}
-
-function restoreLatestCachedReport() {
-  const currentView = localStorage.getItem("opslens_current_view") || "";
-
-  if (currentView !== "reportView") return;
-  if (currentReport) return;
-
-  const cached = getCachedReports();
-
-  if (!cached.length) return;
-
-  currentReport = cached[0].report;
   renderReport(currentReport);
-  saveCurrentReportToDatabase(currentReport);
+  await loadBackendInvestigationHistory();
+
+  finishActiveJob();
+  clearGlobalStatus();
+
+  if (notify) {
+    showToast("Investigation completed", "The RCA report is ready in the Reports section.", null, null, "success");
+  }
 }
 
+async function pollJob() {
+  if (!currentJobId) return;
+
+  try {
+    const job = await api(`/api/investigations/${encodeURIComponent(currentJobId)}`);
+
+    setPipelineHint(job);
+    renderPipeline(job.stages);
+
+    if (job.status === "completed") {
+      await handleCompletedJob(job, true);
+      return;
+    }
+
+    if (job.status === "failed") {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+
+      finishActiveJob();
+      clearGlobalStatus();
+      showToast("Investigation failed", job.error || "Unknown error", null, null, "error");
+      return;
+    }
+
+    setRunButtonRunning(true);
+  } catch (error) {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+
+    finishActiveJob();
+    clearGlobalStatus();
+    showToast("Investigation disconnected", "Could not reconnect to the running job. Please check the API server.", null, null, "error");
+  }
+}
+
+async function restoreActiveJobPolling() {
+  const activeJobId = localStorage.getItem("opslens_active_job_id");
+
+  if (!activeJobId || currentJobId) return;
+
+  currentJobId = activeJobId;
+  setRunButtonRunning(true);
+
+  try {
+    const job = await api(`/api/investigations/${encodeURIComponent(activeJobId)}`);
+
+    setPipelineHint(job);
+    renderPipeline(job.stages);
+
+    if (job.status === "completed") {
+      await handleCompletedJob(job, false);
+      showToast("Investigation completed", "The RCA report is ready in the Reports section.", null, null, "success");
+      return;
+    }
+
+    if (job.status === "failed") {
+      finishActiveJob();
+      clearGlobalStatus();
+      showToast("Investigation failed", job.error || "The restored job failed.", null, null, "error");
+      return;
+    }
+
+    setGlobalStatus("Investigation running", "OpsLens restored the active investigation after refresh.", "View Pipeline", () => showView("pipelineView"));
+
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollJob, 1200);
+
+    showToast("Investigation resumed", "OpsLens reconnected to the running job after refresh.", null, null, "info");
+  } catch (error) {
+    finishActiveJob();
+    clearGlobalStatus();
+    showToast("Investigation not found", "The previous job is no longer available on the API server.", null, null, "warning");
+  }
+}
 
 async function restoreLatestBackendReportIfNeeded() {
   const currentView = localStorage.getItem("opslens_current_view") || "";
@@ -1308,70 +1460,10 @@ async function restoreLatestBackendReportIfNeeded() {
     if (!latest || !latest.record_id) return;
 
     const report = await api(`/api/db/history/${encodeURIComponent(latest.record_id)}`);
-    currentReport = report;
-    renderReport(report);
+    currentReport = normalizeReport(report) || report;
+    renderReport(currentReport);
   } catch (error) {
     console.warn("Could not restore latest backend report:", error);
-  }
-}
-
-
-// =========================================================
-// Final DB history + local cache last 5 override
-// =========================================================
-
-function getCachedReports() {
-  try {
-    return JSON.parse(localStorage.getItem("opslens_cached_reports_v2") || "[]");
-  } catch {
-    return [];
-  }
-}
-
-function cacheReportLocally(report) {
-  if (!report || !report.title) return;
-
-  const affected = report.affected_resources || {};
-  const service =
-    affected.service ||
-    affected.service_name ||
-    affected.workload ||
-    affected.deployment ||
-    affected.pod ||
-    "unknown-service";
-
-  const cached = {
-    cache_id: `${service}_${Date.now()}`,
-    cached_at: new Date().toISOString(),
-    title: report.title || "OpsLens Incident Report",
-    service,
-    namespace: affected.namespace || "",
-    node: affected.node || "",
-    severity: report.severity || "unknown",
-    confidence: report.confidence || "unknown",
-    report,
-  };
-
-  const current = getCachedReports();
-  const next = [cached, ...current].slice(0, 5);
-
-  localStorage.setItem("opslens_cached_reports_v2", JSON.stringify(next));
-}
-
-async function saveCurrentReportToDatabase(report) {
-  if (!report || !report.title) return null;
-
-  try {
-    const saved = await api("/api/db/reports/save", {
-      method: "POST",
-      body: JSON.stringify(report),
-    });
-
-    loadBackendInvestigationHistory();
-    return saved;
-  } catch (error) {
-    console.warn("Could not save report to database:", error);
-    return null;
   }
 }
 
@@ -1381,97 +1473,56 @@ async function loadBackendInvestigationHistory() {
   investigationRecords.innerHTML = `<p class="muted">Loading investigation history...</p>`;
 
   try {
-    const result = await api("/api/db/history");
-    const records = result.records || [];
-
-    if (!records.length) {
-      const cached = getCachedReports();
-
-      if (cached.length) {
-        renderCachedReportsAsHistory(cached);
-        return;
-      }
-
-      investigationRecords.innerHTML = `
-        <div class="empty-history">
-          <strong>No reports yet</strong>
-          <p>Run an investigation first. Completed reports will appear here automatically.</p>
-        </div>
-      `;
-      return;
-    }
-
+    const result = await api("/api/db/history?limit=50");
+    const records = Array.isArray(result.records) ? result.records : [];
     renderBackendInvestigationRecords(records);
   } catch (error) {
-    const cached = getCachedReports();
-
-    if (cached.length) {
-      renderCachedReportsAsHistory(cached);
-      return;
-    }
-
     investigationRecords.innerHTML = `
-      <div class="empty-history">
-        <strong>No reports yet</strong>
-        <p>Could not load database history. Run an investigation first, then refresh history.</p>
+      <div class="history-error">
+        <strong>Could not load backend history</strong>
+        <p>${escapeHtml(error.message || error)}</p>
       </div>
     `;
   }
 }
 
-function renderCachedReportsAsHistory(cached) {
-  investigationRecords.innerHTML = cached.map((item) => {
-    const date = new Date(item.cached_at);
-    const stamp = Number.isNaN(date.getTime()) ? item.cached_at : date.toLocaleString();
+function uniqueHistoryRecords(records) {
+  const seen = new Set();
+  const unique = [];
 
-    return `
-      <div class="record-card cached-record">
-        <div>
-          <strong>${escapeHtml(item.service || "unknown-service")}</strong>
-          <p>${escapeHtml(item.title || "Cached report")}</p>
-        </div>
-        <div>
-          <small>Namespace</small>
-          <span>${escapeHtml(item.namespace || "unknown")}</span>
-        </div>
-        <div>
-          <small>Severity</small>
-          <span>${escapeHtml(item.severity || "unknown")}</span>
-        </div>
-        <div>
-          <small>Cached</small>
-          <span>${escapeHtml(stamp)}</span>
-        </div>
-        <div class="record-actions">
-          <button type="button" class="open-cached-btn" data-cache-id="${escapeHtml(item.cache_id)}">Open</button>
-        </div>
-      </div>
-    `;
-  }).join("");
+  for (const record of records || []) {
+    const fingerprint = stableHistoryFingerprint(record);
+    const key = fingerprint && fingerprint !== "|||||||" ? fingerprint : String(record.record_id || "");
 
-  investigationRecords.querySelectorAll(".open-cached-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const cacheId = btn.dataset.cacheId;
-      const item = getCachedReports().find((entry) => entry.cache_id === cacheId);
+    if (seen.has(key)) continue;
 
-      if (!item) return;
+    seen.add(key);
+    unique.push(record);
+  }
 
-      currentReport = item.report;
-      renderReport(currentReport);
-      showView("reportView");
-    });
-  });
+  return unique;
 }
 
 function renderBackendInvestigationRecords(records) {
   if (!investigationRecords) return;
 
-  investigationRecords.innerHTML = records.map((record) => {
-    const date = new Date(record.modified_at || record.created_at);
-    const stamp = Number.isNaN(date.getTime()) ? (record.created_at || "") : date.toLocaleString();
+  const unique = uniqueHistoryRecords(records);
+
+  if (!unique.length) {
+    investigationRecords.innerHTML = `
+      <div class="empty-history">
+        <strong>No reports yet</strong>
+        <p>Run an investigation first. Completed reports will appear here automatically.</p>
+      </div>
+    `;
+    return;
+  }
+
+  investigationRecords.innerHTML = unique.map((record) => {
+    const stamp = reportCreatedStamp(record);
 
     return `
-      <div class="record-card backend-record" data-record-id="${escapeHtml(record.record_id)}">
+      <div class="record-card backend-record" data-record-id="${escapeHtml(record.record_id || "")}">
         <div>
           <strong>${escapeHtml(record.service || "unknown-service")}</strong>
           <p>${escapeHtml(record.title || "OpsLens Investigation")}</p>
@@ -1489,8 +1540,8 @@ function renderBackendInvestigationRecords(records) {
           <span>${escapeHtml(stamp)}</span>
         </div>
         <div class="record-actions">
-          <button type="button" class="open-record-btn" data-record-id="${escapeHtml(record.record_id)}">Open</button>
-          <button type="button" class="download-record-btn" data-record-id="${escapeHtml(record.record_id)}">PDF</button>
+          <button type="button" class="open-record-btn" data-record-id="${escapeHtml(record.record_id || "")}">Open</button>
+          <button type="button" class="download-record-btn" data-record-id="${escapeHtml(record.record_id || "")}">PDF</button>
         </div>
       </div>
     `;
@@ -1499,1722 +1550,233 @@ function renderBackendInvestigationRecords(records) {
   investigationRecords.querySelectorAll(".open-record-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const recordId = btn.dataset.recordId;
-      const report = await api(`/api/db/history/${encodeURIComponent(recordId)}`);
-      currentReport = report;
-      renderReport(report);
-      showView("reportView");
+
+      if (!recordId) {
+        showToast("No record selected", "Please choose an investigation record first.", null, null, "warning");
+        return;
+      }
+
+      try {
+        const report = await api(`/api/db/history/${encodeURIComponent(recordId)}`);
+        currentReport = normalizeReport(report) || report;
+        currentJobId = null;
+        renderReport(currentReport);
+        showView("reportView");
+      } catch (error) {
+        showToast("Could not open report", error.message || String(error), null, null, "error");
+      }
     });
   });
 
   investigationRecords.querySelectorAll(".download-record-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const recordId = btn.dataset.recordId;
+
+      if (!recordId) {
+        showToast("No record selected", "Please choose an investigation record first.", null, null, "warning");
+        return;
+      }
+
       window.location.href = `/api/db/history/${encodeURIComponent(recordId)}/report/pdf/download`;
     });
   });
 }
 
-function restoreLatestCachedReport() {
-  const currentView = localStorage.getItem("opslens_current_view") || "";
+function renderIncidentGrouping(report) {
+  const existing = document.getElementById("incidentGroupingCard");
+  if (existing) existing.remove();
 
-  if (currentView !== "reportView") return;
-  if (currentReport) return;
+  if (!reportSection || !report) return;
 
-  const cached = getCachedReports();
+  const groups = Array.isArray(report.incident_groups) ? report.incident_groups : [];
+  const separate = Array.isArray(report.separate_findings) ? report.separate_findings : [];
+  const unclassified = Array.isArray(report.unclassified_findings) ? report.unclassified_findings : [];
 
-  if (!cached.length) return;
+  if (!groups.length && !separate.length && !unclassified.length) return;
 
-  currentReport = cached[0].report;
-  renderReport(currentReport);
+  const card = document.createElement("section");
+  card.id = "incidentGroupingCard";
+  card.className = "report-card incident-grouping-card reveal";
+
+  function signalTitle(signal) {
+    if (!signal) return "Signal";
+    if (typeof signal === "string") return signal;
+    return signal.summary || signal.finding || signal.anomaly_type || signal.type || signal.name || "Signal";
+  }
+
+  function signalText(signal) {
+    if (!signal) return "";
+    if (typeof signal === "string") return signal;
+    return signal.message || signal.meaning || signal.resource || signal.pod_name || signal.deployment_name || "";
+  }
+
+  function renderSignalList(signals) {
+    if (!Array.isArray(signals) || !signals.length) {
+      return `<p class="muted">No related signals.</p>`;
+    }
+
+    return `
+      <ul class="incident-signal-list">
+        ${signals.map((signal) => `
+          <li>
+            <strong>${escapeHtml(signalTitle(signal))}</strong>
+            <span>${escapeHtml(signalText(signal))}</span>
+          </li>
+        `).join("")}
+      </ul>
+    `;
+  }
+
+  const groupHtml = groups.map((group, index) => {
+    const root = group.root || group.primary || group.primary_signal || group;
+    const related = group.related_signals || group.supporting_signals || group.related || [];
+
+    return `
+      <div class="incident-group-item">
+        <div class="incident-group-header">
+          <strong>Incident Group ${index + 1}</strong>
+          <span>${escapeHtml(group.relationship || group.reason || "correlated evidence")}</span>
+        </div>
+        <p><b>Root:</b> ${escapeHtml(signalTitle(root))}</p>
+        ${renderSignalList(related)}
+      </div>
+    `;
+  }).join("");
+
+  card.innerHTML = `
+    <div class="section-title">
+      <span>Incident Grouping</span>
+      <small>Primary incident separated from unrelated findings</small>
+    </div>
+
+    ${groupHtml || ""}
+
+    ${separate.length ? `
+      <h4>Separate Findings</h4>
+      ${renderSignalList(separate)}
+    ` : ""}
+
+    ${unclassified.length ? `
+      <h4>Unclassified Findings</h4>
+      ${renderSignalList(unclassified)}
+    ` : ""}
+
+    ${report.incident_grouping_policy ? `
+      <p class="muted">${escapeHtml(report.incident_grouping_policy)}</p>
+    ` : ""}
+  `;
+
+  const after = additionalFindings ? additionalFindings.closest(".report-card") : null;
+
+  if (after && after.parentNode) {
+    after.parentNode.insertBefore(card, after.nextSibling);
+  } else {
+    reportSection.appendChild(card);
+  }
+
+  observeReveal();
 }
 
+async function postExport(report, format) {
+  const response = await fetch(`/api/export/report/${encodeURIComponent(format)}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "*/*",
+    },
+    body: JSON.stringify(report),
+  });
 
-// =========================================================
-// Final product report persistence guard
-// Ensures reports are cached locally and saved to SQLite.
-// =========================================================
-
-(function () {
-  const CACHE_KEY = "opslens_cached_reports_v2";
-  let savingReportToDb = false;
-
-  function readCachedReportsFinal() {
+  if (!response.ok) {
+    let detail = await response.text();
     try {
-      return JSON.parse(localStorage.getItem(CACHE_KEY) || "[]");
-    } catch {
-      return [];
-    }
-  }
-
-  function writeCachedReportsFinal(items) {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(items.slice(0, 5)));
-  }
-
-  window.opslensCacheReportFinal = function (report) {
-    if (!report || !report.title) return;
-
-    const affected = report.affected_resources || {};
-    const service =
-      affected.service ||
-      affected.service_name ||
-      affected.workload ||
-      affected.deployment ||
-      affected.pod ||
-      "unknown-service";
-
-    const item = {
-      cache_id: `${service}_${Date.now()}`,
-      cached_at: new Date().toISOString(),
-      title: report.title || "OpsLens Incident Report",
-      service,
-      namespace: affected.namespace || "",
-      node: affected.node || "",
-      severity: report.severity || "unknown",
-      confidence: report.confidence || "unknown",
-      report,
-    };
-
-    const current = readCachedReportsFinal()
-      .filter((entry) => JSON.stringify(entry.report) !== JSON.stringify(report));
-
-    writeCachedReportsFinal([item, ...current]);
-  };
-
-  window.opslensSaveReportFinal = async function (report) {
-    if (!report || !report.title || savingReportToDb) return null;
-
-    savingReportToDb = true;
-
-    try {
-      const saved = await api("/api/db/reports/save", {
-        method: "POST",
-        body: JSON.stringify(report),
-      });
-
-      return saved;
-    } catch (error) {
-      console.warn("SQLite report save failed:", error);
-      return null;
-    } finally {
-      savingReportToDb = false;
-    }
-  };
-
-  if (typeof renderReport === "function" && !window.__opslensRenderReportWrappedFinal) {
-    window.__opslensRenderReportWrappedFinal = true;
-
-    const originalRenderReport = renderReport;
-
-    renderReport = function (report) {
-      originalRenderReport(report);
-
-      if (report && report.title) {
-        window.opslensCacheReportFinal(report);
-        window.opslensSaveReportFinal(report).then(() => {
-          if (typeof loadBackendInvestigationHistory === "function") {
-            loadBackendInvestigationHistory();
-          }
-        });
-      }
-    };
-  }
-
-  window.opslensRestoreLatestReportFinal = function () {
-    const view = localStorage.getItem("opslens_current_view") || location.hash.replace("#", "");
-
-    if (view !== "reportView") return;
-    if (typeof currentReport !== "undefined" && currentReport) return;
-
-    const cached = readCachedReportsFinal();
-
-    if (!cached.length) return;
-
-    currentReport = cached[0].report;
-
-    if (typeof renderReport === "function") {
-      renderReport(currentReport);
-    }
-  };
-
-  window.addEventListener("load", () => {
-    setTimeout(() => {
-      window.opslensRestoreLatestReportFinal();
-
-      if (typeof loadBackendInvestigationHistory === "function") {
-        loadBackendInvestigationHistory();
-      }
-    }, 350);
-  });
-})();
-
-
-// =========================================================
-// Final feedback success toast
-// Replaces ugly inline success text with a clean floating toast.
-// =========================================================
-
-(function () {
-  function ensureFeedbackToast() {
-    let toast = document.querySelector(".opslens-feedback-toast");
-
-    if (toast) return toast;
-
-    toast = document.createElement("div");
-    toast.className = "opslens-feedback-toast";
-    toast.innerHTML = `
-      <div class="toast-check">?</div>
-      <div>
-        <strong>Feedback sent</strong>
-        <span>Thanks. Your note was saved successfully.</span>
-      </div>
-    `;
-
-    document.body.appendChild(toast);
-    return toast;
-  }
-
-  window.showOpsLensFeedbackToast = function () {
-    const toast = ensureFeedbackToast();
-
-    toast.classList.add("show");
-
-    clearTimeout(window.__opslensFeedbackToastTimer);
-    window.__opslensFeedbackToastTimer = setTimeout(() => {
-      toast.classList.remove("show");
-    }, 2600);
-  };
-
-  function cleanFeedbackInlineMessages() {
-    const feedbackView = document.querySelector("#feedbackView");
-
-    if (!feedbackView) return;
-
-    const candidates = feedbackView.querySelectorAll("p, div, span, small");
-
-    candidates.forEach((node) => {
-      const text = (node.textContent || "").trim().toLowerCase();
-
-      if (
-        text.startsWith("feedback saved") ||
-        text.includes("feedback saved. id") ||
-        text.includes("could not save feedback")
-      ) {
-        node.textContent = "";
-        node.style.display = "none";
-      }
-    });
-  }
-
-  const observer = new MutationObserver(() => {
-    const feedbackView = document.querySelector("#feedbackView");
-
-    if (!feedbackView) return;
-
-    const text = (feedbackView.textContent || "").toLowerCase();
-
-    if (text.includes("feedback saved")) {
-      cleanFeedbackInlineMessages();
-      window.showOpsLensFeedbackToast();
-    }
-  });
-
-  window.addEventListener("load", () => {
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
-  });
-})();
-
-
-// =========================================================
-// Final persistent investigation progress + live stage sync
-// Keeps the investigation bar visible after refresh and
-// updates current stage during polling.
-// =========================================================
-
-(function () {
-  const ACTIVE_JOB_KEY = "opslens_active_job_id";
-  const STATUS_KEY = "opslens_global_status";
-  const STARTED_KEY = "opslens_active_job_started_at";
-  const STAGE_KEY = "opslens_active_pipeline_stage";
-
-  const STAGES = [
-    { id: "scope", label: "Scope" },
-    { id: "collect", label: "Collect" },
-    { id: "detect", label: "Detect" },
-    { id: "reason", label: "Reason" },
-    { id: "report", label: "Report" },
-  ];
-
-  let progressPollTimer = null;
-  let lastStage = localStorage.getItem(STAGE_KEY) || "scope";
-
-  function getActiveJobId() {
-    return localStorage.getItem(ACTIVE_JOB_KEY);
-  }
-
-  function setActiveJob(jobId) {
-    if (!jobId) return;
-
-    localStorage.setItem(ACTIVE_JOB_KEY, jobId);
-    localStorage.setItem(STARTED_KEY, String(Date.now()));
-    localStorage.setItem(STAGE_KEY, "scope");
-
-    lastStage = "scope";
-    showPersistentProgress("scope", "Investigation started");
-    startPersistentProgressPolling();
-  }
-
-  function clearActiveJob() {
-    localStorage.removeItem(ACTIVE_JOB_KEY);
-    localStorage.removeItem(STARTED_KEY);
-    localStorage.removeItem(STAGE_KEY);
-  }
-
-  function stageIndex(stageId) {
-    const index = STAGES.findIndex((stage) => stage.id === stageId);
-    return index < 0 ? 0 : index;
-  }
-
-  function inferStageFromPayload(payload) {
-    const explicit =
-      payload?.current_stage ||
-      payload?.stage ||
-      payload?.pipeline_stage ||
-      payload?.status_stage ||
-      payload?.progress_stage;
-
-    if (explicit) {
-      const value = String(explicit).toLowerCase();
-
-      if (value.includes("scope") || value.includes("queued") || value.includes("apply")) return "scope";
-      if (value.includes("collect") || value.includes("kubernetes") || value.includes("logs") || value.includes("metrics")) return "collect";
-      if (value.includes("detect") || value.includes("agent") || value.includes("anomaly") || value.includes("signal")) return "detect";
-      if (value.includes("reason") || value.includes("supervisor") || value.includes("gemini") || value.includes("rca")) return "reason";
-      if (value.includes("report") || value.includes("complete") || value.includes("done")) return "report";
-    }
-
-    const status = String(payload?.status || payload?.state || "").toLowerCase();
-
-    if (status.includes("complete") || status.includes("success") || status.includes("done")) {
-      return "report";
-    }
-
-    if (status.includes("fail") || status.includes("error")) {
-      return "report";
-    }
-
-    const message = String(payload?.message || payload?.detail || payload?.status_message || "").toLowerCase();
-
-    if (message.includes("collect") || message.includes("collector")) return "collect";
-    if (message.includes("detect") || message.includes("agent") || message.includes("anomaly")) return "detect";
-    if (message.includes("reason") || message.includes("supervisor") || message.includes("rca") || message.includes("gemini")) return "reason";
-    if (message.includes("report") || message.includes("complete")) return "report";
-
-    // Fallback smooth progress when backend does not expose stage.
-    const startedAt = Number(localStorage.getItem(STARTED_KEY) || Date.now());
-    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-
-    if (elapsedSeconds < 5) return "scope";
-    if (elapsedSeconds < 18) return "collect";
-    if (elapsedSeconds < 32) return "detect";
-    if (elapsedSeconds < 48) return "reason";
-    return "report";
-  }
-
-  function getStageLabel(stageId) {
-    return STAGES.find((stage) => stage.id === stageId)?.label || "Running";
-  }
-
-  function ensureProgressBar() {
-    let bar = document.querySelector(".opslens-live-progress");
-
-    if (bar) return bar;
-
-    bar = document.createElement("div");
-    bar.className = "opslens-live-progress";
-    bar.innerHTML = `
-      <div class="live-progress-top">
-        <div>
-          <strong class="live-progress-title">Investigation running</strong>
-          <span class="live-progress-subtitle">OpsLens is collecting evidence from the selected scope.</span>
-        </div>
-        <div class="live-progress-stage">Scope</div>
-      </div>
-      <div class="live-progress-track">
-        <div class="live-progress-fill"></div>
-      </div>
-      <div class="live-progress-steps">
-        ${STAGES.map((stage) => `<span data-live-stage="${stage.id}">${stage.label}</span>`).join("")}
-      </div>
-    `;
-
-    document.body.appendChild(bar);
-    return bar;
-  }
-
-  function showPersistentProgress(stageId, message) {
-    const bar = ensureProgressBar();
-    const index = stageIndex(stageId);
-    const percent = ((index + 1) / STAGES.length) * 100;
-
-    bar.classList.add("show");
-    bar.querySelector(".live-progress-stage").textContent = getStageLabel(stageId);
-    bar.querySelector(".live-progress-fill").style.width = `${percent}%`;
-
-    if (message) {
-      bar.querySelector(".live-progress-subtitle").textContent = message;
-    }
-
-    bar.querySelectorAll("[data-live-stage]").forEach((node) => {
-      const nodeStage = node.dataset.liveStage;
-      const nodeIndex = stageIndex(nodeStage);
-
-      node.classList.toggle("done", nodeIndex < index);
-      node.classList.toggle("active", nodeStage === stageId);
-    });
-
-    syncPipelineStage(stageId);
-  }
-
-  function completePersistentProgress(message) {
-    showPersistentProgress("report", message || "Investigation completed");
-
-    setTimeout(() => {
-      const bar = document.querySelector(".opslens-live-progress");
-      if (bar) bar.classList.remove("show");
-    }, 3200);
-
-    clearActiveJob();
-
-    if (progressPollTimer) {
-      clearInterval(progressPollTimer);
-      progressPollTimer = null;
-    }
-  }
-
-  function syncPipelineStage(stageId) {
-    lastStage = stageId;
-    localStorage.setItem(STAGE_KEY, stageId);
-
-    const index = stageIndex(stageId);
-    const label = getStageLabel(stageId);
-
-    // Update common "current stage" labels.
-    const labelSelectors = [
-      "#currentStage",
-      "#pipelineCurrentStage",
-      ".current-stage",
-      ".current-stage-value",
-      ".pipeline-current-stage",
-      "[data-current-stage]"
-    ];
-
-    labelSelectors.forEach((selector) => {
-      document.querySelectorAll(selector).forEach((node) => {
-        if (node) node.textContent = label;
-      });
-    });
-
-    // Update stage cards/steps by data attributes if present.
-    document.querySelectorAll("[data-stage], [data-pipeline-stage]").forEach((node) => {
-      const nodeStage = (node.dataset.stage || node.dataset.pipelineStage || "").toLowerCase();
-      const nodeIndex = stageIndex(nodeStage);
-
-      node.classList.toggle("is-active", nodeStage === stageId);
-      node.classList.toggle("active", nodeStage === stageId);
-      node.classList.toggle("is-done", nodeIndex >= 0 && nodeIndex < index);
-      node.classList.toggle("done", nodeIndex >= 0 && nodeIndex < index);
-    });
-
-    // Fallback: update visible pipeline cards by text.
-    const stageWords = {
-      scope: ["scope"],
-      collect: ["collect"],
-      detect: ["detect"],
-      reason: ["reason", "rca", "supervisor"],
-      report: ["report"],
-    };
-
-    document.querySelectorAll(".pipeline-step, .pipeline-card, .stage-card, .step-card").forEach((node) => {
-      const text = (node.textContent || "").toLowerCase();
-      let matchedStage = null;
-
-      Object.entries(stageWords).forEach(([stage, words]) => {
-        if (words.some((word) => text.includes(word))) {
-          matchedStage = stage;
-        }
-      });
-
-      if (!matchedStage) return;
-
-      const matchedIndex = stageIndex(matchedStage);
-
-      node.classList.toggle("is-active", matchedStage === stageId);
-      node.classList.toggle("active", matchedStage === stageId);
-      node.classList.toggle("is-done", matchedIndex < index);
-      node.classList.toggle("done", matchedIndex < index);
-    });
-  }
-
-  async function pollActiveJobOnce() {
-    const jobId = getActiveJobId();
-
-    if (!jobId) return;
-
-    try {
-      const response = await fetch(`/api/investigations/${encodeURIComponent(jobId)}`, {
-        headers: { "Accept": "application/json" },
-      });
-
-      if (!response.ok) {
-        showPersistentProgress(lastStage || "scope", "Investigation status is reconnecting...");
-        return;
-      }
-
-      const payload = await response.json();
-      const stage = inferStageFromPayload(payload);
-      const status = String(payload?.status || payload?.state || "").toLowerCase();
-
-      showPersistentProgress(stage, payload?.message || payload?.status_message || "Investigation is running");
-
-      if (
-        status.includes("complete") ||
-        status.includes("success") ||
-        status.includes("done") ||
-        payload?.report ||
-        payload?.result
-      ) {
-        completePersistentProgress("Investigation completed");
-      }
-
-      if (status.includes("fail") || status.includes("error")) {
-        completePersistentProgress("Investigation finished with an error");
-      }
-    } catch (error) {
-      showPersistentProgress(lastStage || "scope", "Investigation status is reconnecting...");
-    }
-  }
-
-  function startPersistentProgressPolling() {
-    if (progressPollTimer) return;
-
-    pollActiveJobOnce();
-
-    progressPollTimer = setInterval(() => {
-      pollActiveJobOnce();
-    }, 2500);
-  }
-
-  // Capture investigation creation and persist job_id.
-  if (!window.__opslensFetchProgressWrapped) {
-    window.__opslensFetchProgressWrapped = true;
-
-    const originalFetch = window.fetch.bind(window);
-
-    window.fetch = async function (...args) {
-      const response = await originalFetch(...args);
-
-      try {
-        const url = String(args[0] || "");
-        const method = String(args[1]?.method || "GET").toUpperCase();
-
-        if (url.includes("/api/investigations") && method === "POST") {
-          response.clone().json().then((payload) => {
-            const jobId = payload?.job_id || payload?.id || payload?.record_id;
-
-            if (jobId) {
-              setActiveJob(jobId);
-            }
-          }).catch(() => {});
-        }
-
-        if (url.includes("/api/investigations/") && method === "GET") {
-          response.clone().json().then((payload) => {
-            const stage = inferStageFromPayload(payload);
-            showPersistentProgress(stage, payload?.message || payload?.status_message || "Investigation is running");
-          }).catch(() => {});
-        }
-      } catch {}
-
-      return response;
-    };
-  }
-
-  window.addEventListener("load", () => {
-    const jobId = getActiveJobId();
-    const stage = localStorage.getItem(STAGE_KEY) || "scope";
-
-    if (jobId) {
-      showPersistentProgress(stage, "Restoring active investigation...");
-      startPersistentProgressPolling();
-    }
-  });
-})();
-
-
-// =========================================================
-// Product disclaimer + hide investigation bar during splash
-// =========================================================
-
-(function () {
-  function markUiReadyAfterSplash() {
-    document.body.classList.remove("opslens-ui-ready");
-
-    const markReady = () => {
-      document.body.classList.add("opslens-ui-ready");
-    };
-
-    // Wait for the splash/logo intro to finish before allowing progress bar visibility.
-    setTimeout(markReady, 1500);
-  }
-
-  function injectProgressDisclaimer() {
-    const bar = document.querySelector(".opslens-live-progress");
-
-    if (!bar) return;
-
-    if (bar.querySelector(".live-progress-disclaimer")) return;
-
-    const note = document.createElement("div");
-    note.className = "live-progress-disclaimer";
-    note.textContent = "OpsLens can make mistakes. Verify evidence and safe commands before applying changes.";
-
-    bar.appendChild(note);
-  }
-
-  window.addEventListener("load", () => {
-    markUiReadyAfterSplash();
-
-    setInterval(() => {
-      injectProgressDisclaimer();
-    }, 600);
-  });
-})();
-
-
-// =========================================================
-// Final report download fallback + completion notification
-// =========================================================
-
-(function () {
-  function getActiveReportForExport() {
-    if (typeof currentReport !== "undefined" && currentReport) {
-      return currentReport;
-    }
-
-    try {
-      const cached = JSON.parse(localStorage.getItem("opslens_cached_reports_v2") || "[]");
-      if (cached.length && cached[0].report) return cached[0].report;
+      const json = JSON.parse(detail);
+      detail = json.detail || detail;
     } catch {}
-
-    return null;
+    throw new Error(detail || `Export failed with status ${response.status}`);
   }
 
-  function safeText(value) {
-    if (value === null || value === undefined) return "";
-    if (Array.isArray(value)) return value.map(safeText).join("\n");
-    if (typeof value === "object") return JSON.stringify(value, null, 2);
-    return String(value);
-  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  const filename = match?.[1] || `opslens-report.${format === "markdown" ? "md" : format}`;
 
-  function listToMarkdown(value) {
-    if (!value) return "- Not found in collected evidence";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
 
-    if (Array.isArray(value)) {
-      if (!value.length) return "- Not found in collected evidence";
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
 
-      return value.map((item) => {
-        if (typeof item === "object" && item !== null) {
-          if (item.command) return `- ${item.title ? `**${item.title}:** ` : ""}\`${item.command}\``;
-          return `- ${safeText(item)}`;
-        }
-        return `- ${safeText(item)}`;
-      }).join("\n");
-    }
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+    a.remove();
+  }, 900);
+}
 
-    if (typeof value === "object") {
-      return Object.entries(value).map(([key, val]) => `- **${key}:** ${safeText(val)}`).join("\n");
-    }
+function selectedDownloadFormat() {
+  const raw = String(downloadFormat?.value || "pdf").toLowerCase().trim();
 
-    return `- ${safeText(value)}`;
-  }
+  if (raw === "xlsx" || raw === "excel") return "xlsx";
+  if (raw === "csv") return "csv";
+  if (raw === "json") return "json";
+  if (raw === "md" || raw === "markdown") return "markdown";
 
-  function reportToMarkdown(report) {
-    const affected = report.affected_resources || {};
-    const fix = report.recommended_fix || {};
+  return "pdf";
+}
 
-    return `# ${report.title || "OpsLens Incident Report"}
-
-## Status
-
-| Field | Value |
-|---|---|
-| Severity | ${report.severity || "not found"} |
-| Confidence | ${report.confidence || "not found"} |
-| Namespace | ${affected.namespace || "not found in collected evidence"} |
-| Node | ${affected.node || affected.node_name || "not found in collected evidence"} |
-| Service | ${affected.service || "not found in collected evidence"} |
-| Deployment | ${affected.deployment || "not found in collected evidence"} |
-
-## Incident Summary
-
-${report.incident_summary || report.summary || "No active incident was detected in the selected scope."}
-
-## Evidence Trail
-
-${listToMarkdown(report.evidence_trail || report.evidence)}
-
-## Additional Findings
-
-${listToMarkdown(report.additional_findings || report.additional_issues)}
-
-## Root Cause Story
-
-${report.root_cause_story || report.root_cause || "No root cause was identified because no active failure evidence was found."}
-
-## Recommended Fix
-
-${fix.strategy || report.recommendation || "No remediation required. Continue monitoring."}
-
-## Safe Commands
-
-${listToMarkdown(fix.safe_commands || report.safe_commands)}
-
-## Verification Plan
-
-${fix.verification_plan || report.verification_plan || "Verify the selected namespace state."}
-
-## Verification Commands
-
-${listToMarkdown(fix.verification_commands || report.verification_commands)}
-
----
-
-OpsLens can make mistakes. Verify evidence and safe commands before applying changes.
-`;
-  }
-
-  function downloadBlob(filename, content, type) {
-    const blob = new Blob([content], { type });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-      a.remove();
-    }, 500);
-  }
-
-  function makeExportName(report, ext) {
-    const affected = report?.affected_resources || {};
-    const service =
-      affected.service ||
-      affected.deployment ||
-      affected.namespace ||
-      "opslens-report";
-
-    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "_");
-    const clean = String(service).replace(/[^a-zA-Z0-9_-]+/g, "-");
-
-    return `${clean}_${stamp}.${ext}`;
-  }
-
-  function getSelectedExportFormat() {
-    const select =
-      document.querySelector("#exportFormat") ||
-      document.querySelector("[name='exportFormat']") ||
-      document.querySelector(".export-card select") ||
-      document.querySelector("#reportView select");
-
-    return String(select?.value || "markdown").toLowerCase();
-  }
-
-  function isDownloadButton(target) {
-    const button = target.closest("button, a");
-
-    if (!button) return false;
-
-    const text = (button.textContent || "").trim().toLowerCase();
-    const id = String(button.id || "").toLowerCase();
-    const cls = String(button.className || "").toLowerCase();
-
-    return (
-      text === "download" ||
-      text.includes("download") ||
-      id.includes("download") ||
-      cls.includes("download")
-    );
-  }
-
-  async function handleReportDownload(event) {
-    if (!isDownloadButton(event.target)) return;
-
-    const reportView = document.querySelector("#reportView");
-    if (!reportView || !reportView.contains(event.target)) return;
-
-    const report = getActiveReportForExport();
-    if (!report) return;
-
-    const format = getSelectedExportFormat();
-
-    // Markdown and JSON should never depend on backend file paths.
-    if (format.includes("markdown") || format === "md") {
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-
-      downloadBlob(
-        makeExportName(report, "md"),
-        reportToMarkdown(report),
-        "text/markdown;charset=utf-8"
-      );
-
+if (copySummaryBtn) {
+  copySummaryBtn.addEventListener("click", async () => {
+    if (!currentReport) {
+      showToast("No report selected", "Please open an investigation report first.", null, null, "warning");
       return;
     }
 
-    if (format.includes("json")) {
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
+    await navigator.clipboard.writeText(buildReportSummaryText(currentReport));
+    showToast("Summary copied", "The report summary is now in your clipboard.", null, null, "success");
+  });
+}
 
-      downloadBlob(
-        makeExportName(report, "json"),
-        JSON.stringify(report, null, 2),
-        "application/json;charset=utf-8"
-      );
-
+if (downloadReportBtn) {
+  downloadReportBtn.addEventListener("click", async () => {
+    if (!currentReport) {
+      showToast("No report selected", "Please open an investigation report before downloading.", null, null, "warning");
       return;
     }
 
-    // PDF/Excel can still use backend route if available.
-  }
-
-  document.addEventListener("click", handleReportDownload, true);
-
-
-  function ensureReportReadyToast() {
-    let toast = document.querySelector(".opslens-report-ready-toast");
-
-    if (toast) return toast;
-
-    toast = document.createElement("div");
-    toast.className = "opslens-report-ready-toast";
-    toast.innerHTML = `
-      <div class="report-ready-check">?</div>
-      <div>
-        <strong>Report ready</strong>
-        <span>Investigation completed. Open the Reports page to review it.</span>
-      </div>
-      <button type="button" class="report-ready-open">Open</button>
-    `;
-
-    toast.querySelector(".report-ready-open").addEventListener("click", () => {
-      location.hash = "#reportView";
-      toast.classList.remove("show");
-    });
-
-    document.body.appendChild(toast);
-    return toast;
-  }
-
-  window.showOpsLensReportReadyToast = function () {
-    const toast = ensureReportReadyToast();
-
-    toast.classList.add("show");
-
-    clearTimeout(window.__opslensReportReadyToastTimer);
-    window.__opslensReportReadyToastTimer = setTimeout(() => {
-      toast.classList.remove("show");
-    }, 5000);
-  };
-
-  function hideAllProgressBarsAfterComplete() {
-    const bars = document.querySelectorAll(
-      ".opslens-live-progress, .global-status, .global-status-bar, .investigation-status, .investigation-status-bar, .status-bar, #globalStatus, #investigationStatus"
-    );
-
-    bars.forEach((bar) => {
-      bar.classList.remove("show", "active", "running", "visible");
-      bar.classList.add("completed");
-      bar.style.opacity = "0";
-      bar.style.pointerEvents = "none";
-    });
-
-    localStorage.removeItem("opslens_active_job_id");
-    localStorage.removeItem("opslens_active_job_started_at");
-    localStorage.removeItem("opslens_active_pipeline_stage");
-    localStorage.removeItem("opslens_global_status");
-  }
-
-  function completeProgressWithNotification() {
-    const bar = document.querySelector(".opslens-live-progress");
-
-    if (bar) {
-      const stage = bar.querySelector(".live-progress-stage");
-      const subtitle = bar.querySelector(".live-progress-subtitle");
-      const fill = bar.querySelector(".live-progress-fill");
-
-      if (stage) stage.textContent = "Completed";
-      if (subtitle) subtitle.textContent = "Investigation completed. Report is ready.";
-      if (fill) fill.style.width = "100%";
-    }
-
-    window.showOpsLensReportReadyToast();
-
-    setTimeout(hideAllProgressBarsAfterComplete, 1800);
-  }
-
-  function payloadCompleted(payload) {
-    const status = String(payload?.status || payload?.state || "").toLowerCase();
-
-    return (
-      status.includes("complete") ||
-      status.includes("completed") ||
-      status.includes("success") ||
-      status.includes("done") ||
-      Boolean(payload?.report) ||
-      Boolean(payload?.result) ||
-      Boolean(payload?.final_report)
-    );
-  }
-
-  if (!window.__opslensReportReadyFetchGuard) {
-    window.__opslensReportReadyFetchGuard = true;
-
-    const originalFetch = window.fetch.bind(window);
-
-    window.fetch = async function (...args) {
-      const response = await originalFetch(...args);
-
-      try {
-        const url = String(args[0] || "");
-        const method = String(args[1]?.method || "GET").toUpperCase();
-
-        if (url.includes("/api/investigations") && method === "GET") {
-          response.clone().json().then((payload) => {
-            if (payloadCompleted(payload)) {
-              completeProgressWithNotification();
-            }
-          }).catch(() => {});
-        }
-      } catch {}
-
-      return response;
-    };
-  }
-})();
-
-
-// =========================================================
-// Startup scope autoselect
-// Opens Investigate view and preselects node/namespace from URL.
-// Example:
-// /?namespace=opslens-payments&node=minikube#investigateView
-// =========================================================
-
-(function () {
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  function getStartupScope() {
-    const params = new URLSearchParams(window.location.search);
-
-    const namespace =
-      params.get("namespace") ||
-      params.get("ns") ||
-      localStorage.getItem("opslens_startup_namespace") ||
-      "";
-
-    const node =
-      params.get("node") ||
-      params.get("node_name") ||
-      localStorage.getItem("opslens_startup_node") ||
-      "";
-
-    if (namespace) localStorage.setItem("opslens_startup_namespace", namespace);
-    if (node) localStorage.setItem("opslens_startup_node", node);
-
-    return { namespace, node };
-  }
-
-  function findSelect(kind) {
-    const all = Array.from(document.querySelectorAll("select"));
-
-    const candidates = all.filter((select) => {
-      const text = [
-        select.id,
-        select.name,
-        select.getAttribute("aria-label"),
-        select.dataset?.field,
-        select.dataset?.name,
-      ].join(" ").toLowerCase();
-
-      if (kind === "node") {
-        return text.includes("node");
-      }
-
-      if (kind === "namespace") {
-        return text.includes("namespace") || text.includes("ns");
-      }
-
-      return false;
-    });
-
-    return candidates[0] || null;
-  }
-
-  function setSelectValue(select, value) {
-    if (!select || !value) return false;
-
-    const options = Array.from(select.options || []);
-    const exact = options.find((option) => option.value === value || option.textContent.trim() === value);
-
-    if (exact) {
-      select.value = exact.value;
-    } else {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      select.appendChild(option);
-      select.value = value;
-    }
-
-    select.dispatchEvent(new Event("input", { bubbles: true }));
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-
-    return true;
-  }
-
-  function openInvestigateView() {
-    if (window.location.hash !== "#investigateView") {
-      window.location.hash = "#investigateView";
-    }
-
-    if (typeof showView === "function") {
-      try {
-        showView("investigateView");
-      } catch {}
-    }
-
-    const investigateNav = Array.from(document.querySelectorAll("a, button")).find((el) => {
-      const text = (el.textContent || "").trim().toLowerCase();
-      const href = String(el.getAttribute("href") || "").toLowerCase();
-      return text.includes("investigate") || href.includes("investigateview");
-    });
-
-    if (investigateNav) {
-      try {
-        investigateNav.click();
-      } catch {}
-    }
-  }
-
-  async function applyStartupScope() {
-    const { namespace, node } = getStartupScope();
-
-    if (!namespace && !node) return;
-
-    openInvestigateView();
-
-    // Wait for dropdowns to be populated by backend.
-    for (let attempt = 0; attempt < 12; attempt++) {
-      await sleep(350);
-
-      const nodeSelect = findSelect("node");
-      const namespaceSelect = findSelect("namespace");
-
-      if (nodeSelect && node) {
-        setSelectValue(nodeSelect, node);
-      }
-
-      // Namespace options may reload after node change.
-      await sleep(200);
-
-      const namespaceSelectAfterNode = findSelect("namespace") || namespaceSelect;
-
-      if (namespaceSelectAfterNode && namespace) {
-        setSelectValue(namespaceSelectAfterNode, namespace);
-      }
-
-      if ((!node || findSelect("node")?.value === node) && (!namespace || findSelect("namespace")?.value === namespace)) {
-        break;
-      }
-    }
-  }
-
-  window.addEventListener("load", () => {
-    setTimeout(() => {
-      applyStartupScope();
-    }, 900);
-  });
-})();
-
-
-// =========================================================
-// Final product UX patch:
-// - local Markdown/JSON download
-// - progress notification/hide
-// - remove disclaimer from progress
-// - collapse side menu after navigation
-// =========================================================
-
-(function () {
-  function tryGetCurrentReport() {
     try {
-      if (typeof currentReport !== "undefined" && currentReport) return currentReport;
-    } catch {}
-
-    try {
-      const cached = JSON.parse(localStorage.getItem("opslens_cached_reports_v2") || "[]");
-      if (Array.isArray(cached) && cached.length) {
-        return cached[0].report || cached[0];
-      }
-    } catch {}
-
-    return null;
-  }
-
-  function text(value) {
-    if (value === null || value === undefined) return "";
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) return value.map(text).join("\n");
-    if (typeof value === "object") return JSON.stringify(value, null, 2);
-    return String(value);
-  }
-
-  function mdList(value) {
-    if (!value) return "- Not found in collected evidence";
-
-    if (Array.isArray(value)) {
-      if (!value.length) return "- Not found in collected evidence";
-
-      return value.map((item) => {
-        if (item && typeof item === "object") {
-          if (item.command) {
-            return `- ${item.title ? `**${item.title}:** ` : ""}\`${item.command}\``;
-          }
-          return `- ${text(item)}`;
-        }
-        return `- ${text(item)}`;
-      }).join("\n");
-    }
-
-    if (typeof value === "object") {
-      return Object.entries(value)
-        .map(([key, val]) => `- **${key}:** ${text(val) || "Not found in collected evidence"}`)
-        .join("\n");
-    }
-
-    return `- ${text(value)}`;
-  }
-
-  function reportMarkdown(report) {
-    const affected = report?.affected_resources || {};
-    const fix = report?.recommended_fix || {};
-
-    return `# ${report?.title || "OpsLens Report"}
-
-## Status
-
-| Field | Value |
-|---|---|
-| Severity | ${report?.severity || "not found"} |
-| Confidence | ${report?.confidence || "not found"} |
-| Namespace | ${affected.namespace || "not found in collected evidence"} |
-| Node | ${affected.node || affected.node_name || "not found in collected evidence"} |
-| Service | ${affected.service || "not found in collected evidence"} |
-| Deployment | ${affected.deployment || "not found in collected evidence"} |
-
-## Incident Summary
-
-${report?.incident_summary || report?.summary || "No active incident was detected in the selected scope."}
-
-## Evidence Trail
-
-${mdList(report?.evidence_trail || report?.evidence)}
-
-## Additional Findings
-
-${mdList(report?.additional_findings || report?.additional_issues)}
-
-## Root Cause Story
-
-${report?.root_cause_story || report?.root_cause || "No root cause was identified because no active failure evidence was found."}
-
-## Recommended Fix
-
-${fix.strategy || report?.recommendation || "No remediation required. Continue monitoring."}
-
-## Safe Commands
-
-${mdList(fix.safe_commands || report?.safe_commands)}
-
-## Verification Plan
-
-${fix.verification_plan || report?.verification_plan || "Verify the selected namespace state."}
-
-## Verification Commands
-
-${mdList(fix.verification_commands || report?.verification_commands)}
-
----
-
-OpsLens can make mistakes. Verify evidence and safe commands before applying changes.
-`;
-  }
-
-  function downloadFile(filename, content, mime) {
-    const blob = new Blob([content], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-      a.remove();
-    }, 500);
-  }
-
-  function exportFormat() {
-    const select =
-      document.querySelector("#exportFormat") ||
-      document.querySelector("[name='exportFormat']") ||
-      document.querySelector("#reportView select") ||
-      document.querySelector(".export-card select");
-
-    return String(select?.value || "markdown").toLowerCase();
-  }
-
-  function reportFilename(report, ext) {
-    const affected = report?.affected_resources || {};
-    const base = affected.service || affected.deployment || affected.namespace || "opslens-report";
-    const clean = String(base).replace(/[^a-zA-Z0-9_-]+/g, "-");
-    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "_");
-
-    return `${clean}_${stamp}.${ext}`;
-  }
-
-  function looksLikeDownloadButton(el) {
-    const button = el?.closest?.("button, a");
-    if (!button) return null;
-
-    const label = (button.textContent || "").trim().toLowerCase();
-    const id = String(button.id || "").toLowerCase();
-    const cls = String(button.className || "").toLowerCase();
-    const href = String(button.getAttribute("href") || "").toLowerCase();
-
-    const isDownload =
-      label.includes("download") ||
-      id.includes("download") ||
-      cls.includes("download") ||
-      href.includes("download");
-
-    if (!isDownload) return null;
-
-    const reportView = document.querySelector("#reportView");
-    if (reportView && !reportView.contains(button)) return null;
-
-    return button;
-  }
-
-  async function handleLocalDownload(event) {
-    const button = looksLikeDownloadButton(event.target);
-    if (!button) return;
-
-    const report = tryGetCurrentReport();
-    if (!report) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-
-    const format = exportFormat();
-    const normalizedFormat =
-      format.includes("pdf") ? "pdf" :
-      format.includes("excel") || format.includes("xlsx") ? "xlsx" :
-      format.includes("json") ? "json" :
-      "markdown";
-
-    try {
-      const response = await fetch(`/api/export/report/${encodeURIComponent(normalizedFormat)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "*/*",
-        },
-        body: JSON.stringify(report),
-      });
-
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || `Export failed with status ${response.status}`);
-      }
-
-      const blob = await response.blob();
-
-      let filename = `opslens-report.${normalizedFormat === "xlsx" ? "xlsx" : normalizedFormat}`;
-      const disposition = response.headers.get("content-disposition") || "";
-      const match = disposition.match(/filename="?([^"]+)"?/i);
-      if (match && match[1]) filename = match[1];
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-
-      setTimeout(() => {
-        URL.revokeObjectURL(url);
-        a.remove();
-      }, 500);
+      await postExport(currentReport, selectedDownloadFormat());
+      showToast("Download started", "Your report export is being downloaded.", null, null, "success");
     } catch (error) {
-      console.error("Export failed:", error);
-      alert(`Export failed: ${error.message || error}`);
+      console.error("Download failed:", error);
+      showToast("Download failed", error.message || String(error), null, null, "error");
     }
-  }
-
-  ["pointerdown", "mousedown", "click"].forEach((eventName) => {
-    document.addEventListener(eventName, handleLocalDownload, true);
   });
-
-  function neutralizeBackendDownloadLinks() {
-    const reportView = document.querySelector("#reportView");
-    if (!reportView) return;
-
-    reportView.querySelectorAll("a[href*='download'], button").forEach((el) => {
-      const label = (el.textContent || "").toLowerCase();
-
-      if (!label.includes("download") && !String(el.getAttribute("href") || "").includes("download")) return;
-
-      el.removeAttribute("href");
-      el.removeAttribute("target");
-      el.dataset.localDownload = "true";
-    });
-  }
-
-  setInterval(neutralizeBackendDownloadLinks, 700);
-
-  function removeProgressDisclaimer() {
-    document.querySelectorAll(".live-progress-disclaimer").forEach((el) => el.remove());
-  }
-
-  setInterval(removeProgressDisclaimer, 500);
-
-  function ensureReportReadyToast() {
-    let toast = document.querySelector(".opslens-report-ready-toast");
-
-    if (toast) return toast;
-
-    toast = document.createElement("div");
-    toast.className = "opslens-report-ready-toast";
-    toast.innerHTML = `
-      <div class="report-ready-check">?</div>
-      <div>
-        <strong>Report ready</strong>
-        <span>Investigation completed. Open Reports to review it.</span>
-      </div>
-      <button type="button" class="report-ready-open">Open</button>
-    `;
-
-    toast.querySelector(".report-ready-open").addEventListener("click", () => {
-      location.hash = "#reportView";
-      toast.classList.remove("show");
-    });
-
-    document.body.appendChild(toast);
-    return toast;
-  }
-
-  function showReportReadyToast() {
-    const toast = ensureReportReadyToast();
-
-    toast.classList.add("show");
-
-    clearTimeout(window.__opslensReportReadyToastTimer);
-    window.__opslensReportReadyToastTimer = setTimeout(() => {
-      toast.classList.remove("show");
-    }, 5000);
-  }
-
-  function hideProgressBars() {
-    document.querySelectorAll(
-      ".opslens-live-progress, .global-status, .global-status-bar, .investigation-status, .investigation-status-bar, .status-bar, #globalStatus, #investigationStatus"
-    ).forEach((bar) => {
-      bar.classList.remove("show", "active", "running", "visible");
-      bar.classList.add("completed");
-      bar.style.opacity = "0";
-      bar.style.pointerEvents = "none";
-    });
-
-    localStorage.removeItem("opslens_active_job_id");
-    localStorage.removeItem("opslens_active_job_started_at");
-    localStorage.removeItem("opslens_active_pipeline_stage");
-    localStorage.removeItem("opslens_global_status");
-  }
-
-  function completeInvestigationUi() {
-    const bar = document.querySelector(".opslens-live-progress");
-
-    if (bar) {
-      const stage = bar.querySelector(".live-progress-stage");
-      const subtitle = bar.querySelector(".live-progress-subtitle");
-      const fill = bar.querySelector(".live-progress-fill");
-
-      if (stage) stage.textContent = "Completed";
-      if (subtitle) subtitle.textContent = "Investigation completed. Report is ready.";
-      if (fill) fill.style.width = "100%";
-    }
-
-    showReportReadyToast();
-    setTimeout(hideProgressBars, 1600);
-  }
-
-  function payloadIsDone(payload) {
-    const status = String(payload?.status || payload?.state || "").toLowerCase();
-
-    return (
-      status.includes("complete") ||
-      status.includes("completed") ||
-      status.includes("success") ||
-      status.includes("done") ||
-      Boolean(payload?.report) ||
-      Boolean(payload?.result) ||
-      Boolean(payload?.final_report)
-    );
-  }
-
-  if (!window.__opslensFinalDoneFetchPatch) {
-    window.__opslensFinalDoneFetchPatch = true;
-
-    const originalFetch = window.fetch.bind(window);
-
-    window.fetch = async function (...args) {
-      const response = await originalFetch(...args);
-
-      try {
-        const url = String(args[0] || "");
-        const method = String(args[1]?.method || "GET").toUpperCase();
-
-        if (url.includes("/api/investigations") && method === "GET") {
-          response.clone().json().then((payload) => {
-            if (payloadIsDone(payload)) completeInvestigationUi();
-          }).catch(() => {});
-        }
-      } catch {}
-
-      return response;
-    };
-  }
-
-  function collapseSideMenu() {
-    document.body.classList.remove(
-      "sidebar-open",
-      "menu-open",
-      "nav-open",
-      "sidebar-expanded",
-      "side-menu-open"
-    );
-
-    document.querySelectorAll(
-      ".sidebar, .app-sidebar, .side-panel, .side-rail, .left-sidebar, .nav-sidebar, .rail"
-    ).forEach((el) => {
-      el.classList.remove("open", "opened", "expanded", "show", "is-open", "is-expanded");
-      el.classList.add("collapsed");
-    });
-
-    document.querySelectorAll("[aria-expanded='true']").forEach((el) => {
-      el.setAttribute("aria-expanded", "false");
-    });
-  }
-
-  document.addEventListener("click", (event) => {
-    const navItem = event.target.closest(
-      ".sidebar a, .sidebar button, .app-sidebar a, .app-sidebar button, .side-panel a, .side-panel button, .side-rail a, .side-rail button, .nav-sidebar a, .nav-sidebar button, .rail a, .rail button"
-    );
-
-    if (!navItem) return;
-
-    setTimeout(collapseSideMenu, 120);
-  }, true);
-
-  window.addEventListener("hashchange", () => {
-    setTimeout(collapseSideMenu, 120);
-  });
-})();
-
-
-// =========================================================
-// Selected report export v2
-// Last 5 cached reports + backend export by selected format.
-// =========================================================
-
-(function () {
-  const CACHE_KEY = "opslens_cached_reports_v2";
-
-  function readCachedReportsForExport() {
-    try {
-      const items = JSON.parse(localStorage.getItem(CACHE_KEY) || "[]");
-      if (!Array.isArray(items)) return [];
-
-      return items
-        .map((item, index) => {
-          const report = item.report || item;
-          const affected = report.affected_resources || {};
-          return {
-            id: item.cache_id || item.record_id || item.id || `cached-${index}`,
-            label: [
-              report.title || "OpsLens Report",
-              affected.namespace ? `ns:${affected.namespace}` : "",
-              affected.service ? `svc:${affected.service}` : "",
-              item.cached_at ? new Date(item.cached_at).toLocaleString() : "",
-            ].filter(Boolean).join(" | "),
-            report,
-          };
-        })
-        .slice(0, 5);
-    } catch {
-      return [];
-    }
-  }
-
-  function currentReportForExport() {
-    try {
-      if (typeof currentReport !== "undefined" && currentReport) {
-        return currentReport;
-      }
-    } catch {}
-
-    return null;
-  }
-
-  function ensureCurrentReportInExportCache() {
-    const report = currentReportForExport();
-    if (!report) return;
-
-    const items = readCachedReportsForExport();
-    const text = JSON.stringify(report);
-
-    const exists = items.some((item) => JSON.stringify(item.report) === text);
-    if (exists) return;
-
-    const affected = report.affected_resources || {};
-    const newItem = {
-      cache_id: `current-${Date.now()}`,
-      cached_at: new Date().toISOString(),
-      title: report.title || "OpsLens Report",
-      service: affected.service || affected.deployment || affected.namespace || "opslens-report",
-      namespace: affected.namespace || "",
-      report,
-    };
-
-    const raw = JSON.parse(localStorage.getItem(CACHE_KEY) || "[]");
-    localStorage.setItem(CACHE_KEY, JSON.stringify([newItem, ...raw].slice(0, 5)));
-  }
-
-  function ensureExportReportSelector() {
-    const reportView = document.querySelector("#reportView");
-    if (!reportView) return null;
-
-    let selector = document.querySelector("#opslensExportReportSelect");
-    if (selector) return selector;
-
-    const exportCard =
-      reportView.querySelector(".export-card") ||
-      reportView.querySelector("[class*='export']") ||
-      reportView;
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "opslens-export-report-picker";
-    wrapper.innerHTML = `
-      <label for="opslensExportReportSelect">Report to download</label>
-      <select id="opslensExportReportSelect"></select>
-      <small>Latest 5 cached reports are available for export.</small>
-    `;
-
-    exportCard.prepend(wrapper);
-
-    return wrapper.querySelector("select");
-  }
-
-  function refreshExportReportSelector() {
-    ensureCurrentReportInExportCache();
-
-    const selector = ensureExportReportSelector();
-    if (!selector) return;
-
-    const previous = selector.value;
-    const reports = readCachedReportsForExport();
-
-    selector.innerHTML = "";
-
-    if (!reports.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "No cached reports available";
-      selector.appendChild(option);
-      return;
-    }
-
-    reports.forEach((item, index) => {
-      const option = document.createElement("option");
-      option.value = item.id;
-      option.textContent = `${index + 1}. ${item.label}`;
-      selector.appendChild(option);
-    });
-
-    if (previous && Array.from(selector.options).some((opt) => opt.value === previous)) {
-      selector.value = previous;
-    }
-  }
-
-  function selectedReportForExport() {
-    ensureCurrentReportInExportCache();
-
-    const selector = document.querySelector("#opslensExportReportSelect");
-    const reports = readCachedReportsForExport();
-
-    if (selector && selector.value) {
-      const selected = reports.find((item) => item.id === selector.value);
-      if (selected?.report) return selected.report;
-    }
-
-    if (reports[0]?.report) return reports[0].report;
-
-    return currentReportForExport();
-  }
-
-  function selectedExportFormat() {
-    const select =
-      document.querySelector("#exportFormat") ||
-      document.querySelector("[name='exportFormat']") ||
-      document.querySelector("#reportView select:not(#opslensExportReportSelect)") ||
-      document.querySelector(".export-card select:not(#opslensExportReportSelect)");
-
-    const value = String(select?.value || "markdown").toLowerCase();
-
-    if (value.includes("pdf")) return "pdf";
-    if (value.includes("excel") || value.includes("xlsx")) return "xlsx";
-    if (value.includes("json")) return "json";
-    return "markdown";
-  }
-
-  function isReportDownloadButton(target) {
-    const button = target.closest("button, a");
-    if (!button) return false;
-
-    const reportView = document.querySelector("#reportView");
-    if (reportView && !reportView.contains(button)) return false;
-
-    const text = (button.textContent || "").toLowerCase();
-    const id = String(button.id || "").toLowerCase();
-    const cls = String(button.className || "").toLowerCase();
-    const href = String(button.getAttribute("href") || "").toLowerCase();
-
-    return (
-      text.includes("download") ||
-      id.includes("download") ||
-      cls.includes("download") ||
-      href.includes("download")
-    );
-  }
-
-  async function exportSelectedReport(event) {
-    if (!isReportDownloadButton(event.target)) return;
-
-    const report = selectedReportForExport();
-    if (!report) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-
-    const format = selectedExportFormat();
-
-    try {
-      const response = await fetch(`/api/export/report/${encodeURIComponent(format)}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "*/*",
-        },
-        body: JSON.stringify(report),
-      });
-
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || `Export failed with status ${response.status}`);
-      }
-
-      const blob = await response.blob();
-      let filename = `opslens-report.${format === "xlsx" ? "xlsx" : format}`;
-
-      const disposition = response.headers.get("content-disposition") || "";
-      const match = disposition.match(/filename="?([^"]+)"?/i);
-      if (match?.[1]) filename = match[1];
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-
-      setTimeout(() => {
-        URL.revokeObjectURL(url);
-        a.remove();
-      }, 600);
-    } catch (error) {
-      console.error("Report export failed:", error);
-      alert(`Report export failed: ${error.message || error}`);
-    }
-  }
-
-  ["pointerdown", "mousedown", "click"].forEach((eventName) => {
-    document.addEventListener(eventName, exportSelectedReport, true);
-  });
-
-  window.addEventListener("load", () => {
-    setInterval(refreshExportReportSelector, 1000);
-  });
-})();
-
-
-// =========================================================
-// Progress spacing guard
-// Adds page bottom spacing while progress bar is visible.
-// =========================================================
-
-(function () {
-  function syncProgressSpacing() {
-    const bar = document.querySelector(".opslens-live-progress");
-    const isVisible =
-      bar &&
-      bar.classList.contains("show") &&
-      !bar.classList.contains("completed") &&
-      getComputedStyle(bar).opacity !== "0";
-
-    document.body.classList.toggle("opslens-progress-running", Boolean(isVisible));
-  }
-
-  window.addEventListener("load", () => {
-    setInterval(syncProgressSpacing, 300);
-  });
-
-  window.addEventListener("scroll", syncProgressSpacing, { passive: true });
-})();
-
+}
+
+if (refreshHistoryBtn) {
+  refreshHistoryBtn.addEventListener("click", loadBackendInvestigationHistory);
+}
+
+if (clearRecordsBtn) {
+  clearRecordsBtn.style.display = "none";
+}
+
+window.opslensCacheReportFinal = function () {
+  return;
+};
+
+window.opslensSaveReportFinal = async function () {
+  return null;
+};
+
+window.opslensRestoreLatestReportFinal = function () {
+  return;
+};
+
+window.addEventListener("load", () => {
+  clearFrontendHistoryCache();
+  document.querySelectorAll(".opslens-export-report-picker").forEach((node) => node.remove());
+  loadBackendInvestigationHistory();
+});

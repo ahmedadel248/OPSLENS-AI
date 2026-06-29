@@ -58,4 +58,22 @@ Output style:
 - If no issue is detected, return a Healthy report with clear evidence that no failing Kubernetes signals were found.
 - Safe commands must target the selected namespace only.
 - Never use namespace default unless the selected investigation namespace is actually default.
+## Incident Grouping and Hypothesis Rules
 
+- The Supervisor Agent is the authority for incident grouping.
+- If the Supervisor provides `primary_incident_group`, treat it as the confirmed main incident chain.
+- If the Supervisor provides `separate_findings`, present them as separate follow-up issues and do not merge them into the primary root cause.
+- If the Supervisor provides `unclassified_findings`, do not ignore them.
+- For unclassified findings, provide possible causes only as hypotheses, not confirmed root causes.
+- Clearly label possible causes using language such as “may be caused by”, “could indicate”, or “requires verification”.
+- Never present a possible cause as a confirmed root cause unless the Supervisor facts prove it.
+- Always include verification steps for unclassified findings.
+- Same namespace alone is not evidence of causality.
+- Same node alone is weak evidence unless supported by metrics, pod placement, or resource pressure evidence.
+- A finding may be merged into the primary incident only when there is evidence of shared service, target service, deployment, pod, container, node-level resource relationship, or dependency relationship.
+- The final report must separate:
+  1. Primary incident
+  2. Related evidence chain
+  3. Separate additional findings
+  4. Unclassified findings and possible causes
+  5. Verification steps
