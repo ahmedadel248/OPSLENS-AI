@@ -4183,3 +4183,74 @@ input[type="number"]::-webkit-outer-spin-button {
     flex-direction: column;
   }
 }
+
+/* =========================================================
+   OpsLens UI pipeline/copy polish v2
+   Safe visual polish only. Keeps old animations intact.
+   ========================================================= */
+
+.pipeline.pipeline-balanced {
+  grid-template-columns: repeat(3, minmax(190px, 1fr));
+  align-items: stretch;
+}
+
+.pipeline.pipeline-balanced::before {
+  display: none;
+}
+
+.pipeline.pipeline-balanced .stage {
+  min-height: 150px;
+}
+
+.pipeline.pipeline-balanced .stage h4 {
+  font-size: 16px;
+}
+
+.pipeline.pipeline-balanced .stage p {
+  line-height: 1.45;
+  text-transform: none;
+}
+
+.stage.receiving {
+  border-color: rgba(229, 9, 20, 0.35);
+}
+
+.command-copyable {
+  position: relative;
+}
+
+.command-copyable .command-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.command-copyable .command-header strong {
+  color: var(--soft);
+  font-size: 13px;
+}
+
+.command-copyable .copy-btn {
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.command-copyable pre {
+  max-height: 360px;
+  overflow: auto;
+}
+
+@media (max-width: 980px) {
+  .pipeline.pipeline-balanced {
+    grid-template-columns: repeat(2, minmax(160px, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .pipeline.pipeline-balanced {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "model_type": "pod_lstm_resource_detector",
+  "version": "v3_timeaware_minmax_pods_on_only",
+  "window_size": 10,
+  "sampling_interval_seconds": 30,
+  "features": [
+    "hour_sin",
+    "hour_cos",
+    "cpu_usage",
+    "mem_usage"
+  ],
+  "targets": [
+    "cpu_usage",
+    "mem_usage"
+  ],
+  "cpu_threshold": 0.005151720717549324,
+  "memory_threshold": 0.34267371892929077,
+  "cpu_column_source": "CPU (%)",
+  "memory_column_source": "MEM (B)",
+  "memory_transform": "log1p",
+  "scaler": "MinMaxScaler",
+  "time_features": {
+    "hour_sin": "sin(2*pi*hour/24)",
+    "hour_cos": "cos(2*pi*hour/24)"
+  },
+  "training_data": {
+    "main": "/content/pod_telemetry_pods_on.csv"
+  },
+  "notes": [
+    "pod_name is used for grouping only, not as a model feature.",
+    "Energy is ignored.",
+    "pods_off is excluded completely from training/evaluation.",
+    "The model predicts next CPU and memory from the previous 10 readings.",
+    "Live collector must sample every 30 seconds to match the training data rhythm.",
+    "Time is represented as a daily cycle using hour_sin/hour_cos.",
+    "No is_work_hour feature is used.",
+    "No relative_memory preprocessing is used."
+  ]
+}

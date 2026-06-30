@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import threading
@@ -277,28 +276,10 @@ def _run_job(job_id: str, request: InvestigationRequest) -> None:
         except Exception:
             pass
 
-        scenario_filter_payload = _opslens_extract_scenario_filter_payload(request)
-
-        previous_filter = os.environ.get("OPSLENS_SCENARIO_FILTER_JSON")
-
-        try:
-            if scenario_filter_payload:
-                os.environ["OPSLENS_SCENARIO_FILTER_JSON"] = json.dumps(
-                    scenario_filter_payload,
-                    ensure_ascii=False,
-                )
-            else:
-                os.environ.pop("OPSLENS_SCENARIO_FILTER_JSON", None)
-
-            final_report = run_opslens_investigation(
-                scope=scope,
-                demo_seed_metrics=False,
-            )
-        finally:
-            if previous_filter is None:
-                os.environ.pop("OPSLENS_SCENARIO_FILTER_JSON", None)
-            else:
-                os.environ["OPSLENS_SCENARIO_FILTER_JSON"] = previous_filter
+        final_report = run_opslens_investigation(
+            scope=scope,
+            demo_seed_metrics=False,
+        )
 
         # Guard report before it is stored in the job/result cache.
         try:
@@ -1591,158 +1572,3 @@ def get_latest_job() -> Optional[Dict[str, Any]]:
         return list(JOBS.values())[-1]
 
     return _opslens_latest_job_snapshot()
-
-# =========================================================
-# OpsLens preloaded scenario focus support v1
-# =========================================================
-# OpsLens preloaded scenario focus support v1
-# When all scenarios are already applied, selected scenario_name becomes
-# an investigation focus, not a fresh apply/reset action.
-# =========================================================
-
-def _opslens_extract_manifest_docs(text: str):
-    return [part.strip() for part in re.split(r"(?m)^---\s*$", text or "") if part.strip()]
-
-
-def _opslens_yaml_value(doc: str, key: str):
-    pattern = rf"(?m)^\s*{re.escape(key)}\s*:\s*['\"]?([^'\"\n#]+)['\"]?\s*$"
-    match = re.search(pattern, doc or "")
-    return match.group(1).strip() if match else ""
-
-
-def _opslens_extract_scenario_filter_payload(request):
-    scenario_name = getattr(request, "scenario_name", None)
-
-    if not scenario_name:
-        return None
-
-    source_path = SCENARIOS_DIR / scenario_name
-
-    if not source_path.exists():
-        return None
-
-    try:
-        content = source_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return None
-
-    deployments = []
-    services = []
-    pods = []
-    resource_names = []
-    scenario_label = ""
-
-    label_match = re.search(
-        r"(?m)^\s*opslens\.ai/scenario\s*:\s*['\"]?([^'\"\n#]+)['\"]?\s*$",
-        content,
-    )
-
-    if label_match:
-        scenario_label = label_match.group(1).strip()
-
-    for doc in _opslens_extract_manifest_docs(content):
-        kind = _opslens_yaml_value(doc, "kind")
-        name = ""
-
-        metadata_match = re.search(
-            r"(?ms)^metadata\s*:\s*(.*?)(?:^\S|\Z)",
-            doc,
-        )
-
-        if metadata_match:
-            name = _opslens_yaml_value(metadata_match.group(1), "name")
-
-        if not name:
-            name = _opslens_yaml_value(doc, "name")
-
-        if not name:
-            continue
-
-        resource_names.append(name)
-
-        if kind.lower() == "deployment":
-            deployments.append(name)
-        elif kind.lower() == "service":
-            services.append(name)
-        elif kind.lower() == "pod":
-            pods.append(name)
-
-    return {
-        "scenario_name": scenario_name,
-        "scenario_label": scenario_label,
-        "namespace": getattr(request, "namespace", ""),
-        "deployments": sorted(set(deployments)),
-        "services": sorted(set(services)),
-        "pods": sorted(set(pods)),
-        "resource_names": sorted(set(resource_names)),
-    }
-
-# =========================================================
-# OpsLens final indexed scenario focus v2
-# =========================================================
-# OpsLens final indexed scenario focus v2
-# Uses scenarios/scenarios_index.json as source of truth.
-# selected scenario_name is investigation focus only.
-# =========================================================
-
-from pathlib import Path as _OpsFocusPath
-
-
-def _opslens_load_scenario_index():
-    index_path = _OpsFocusPath("scenarios") / "scenarios_index.json"
-
-    if not index_path.exists():
-        return {"scenarios": []}
-
-    try:
-        return json.loads(index_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"scenarios": []}
-
-
-def _opslens_extract_scenario_filter_payload(request):
-    scenario_name = getattr(request, "scenario_name", None)
-    namespace = getattr(request, "namespace", "")
-
-    if not scenario_name:
-        return None
-
-    index = _opslens_load_scenario_index()
-    scenarios = index.get("scenarios") or []
-
-    selected = None
-
-    for item in scenarios:
-        if not isinstance(item, dict):
-            continue
-
-        candidates = {
-            str(item.get("id") or ""),
-            str(item.get("name") or ""),
-            str(item.get("manifest") or ""),
-            str(item.get("filename") or ""),
-        }
-
-        if str(scenario_name) in candidates:
-            selected = item
-            break
-
-    if not selected:
-        return None
-
-    selected_namespace = selected.get("namespace") or namespace
-
-    resources = selected.get("resources") or []
-    primary_resources = selected.get("primary_resources") or resources
-    related_resources = selected.get("related_resources") or []
-    focus_label = selected.get("focus_label") or selected.get("id") or ""
-
-    return {
-        "scenario_name": selected.get("id") or scenario_name,
-        "scenario_label": focus_label,
-        "namespace": selected_namespace,
-        "resource_names": sorted(set(resources + primary_resources + related_resources)),
-        "primary_resources": sorted(set(primary_resources)),
-        "related_resources": sorted(set(related_resources)),
-        "manifest": selected.get("manifest") or "",
-    }

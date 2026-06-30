@@ -78,8 +78,13 @@ class SupervisorAgent:
 
                 all_events.append(error_event)
 
-        primary_event = self._select_primary_event(all_events)
-        supporting_events = self._select_supporting_events(all_events, primary_event)
+        incident_events = [
+            event for event in all_events
+            if not self._is_internal_agent_health_event(event)
+        ]
+
+        primary_event = self._select_primary_event(incident_events)
+        supporting_events = self._select_supporting_events(incident_events, primary_event)
 
         report = self._build_clean_report(
             scenario_name=scenario_name,
@@ -180,6 +185,19 @@ class SupervisorAgent:
 
         return report
 
+
+    def _is_internal_agent_health_event(self, event: Dict[str, Any]) -> bool:
+        if event.get("internal_agent_health"):
+            return True
+
+        if event.get("event_type") in {"agent_execution_error", "agent_health"}:
+            return True
+
+        if event.get("anomaly_type") in {"AgentExecutionError", "PodLSTMUnavailable"}:
+            return True
+
+        return False
+
     def _select_primary_event(self, events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not events:
             return None
@@ -224,6 +242,13 @@ class SupervisorAgent:
             "cpu_anomaly": 76,
             "memory_anomaly": 76,
             "cpu_memory_anomaly": 78,
+            "PodLSTMResourceAnomaly": 76,
+            "HighPodCPU": 76,
+
+            # Readiness / availability
+            "ReadinessProbeFailed": 89,
+            "DeploymentUnavailable": 78,
+            "PodNotReady": 70,
         }
 
         severity_score = {
@@ -379,6 +404,18 @@ class SupervisorAgent:
             "FirewallActive": (
                 "The node firewall is active and may block required Kubernetes or application traffic."
             ),
+            "PodLSTMResourceAnomaly": (
+                "The pod-level LSTM model detected resource usage higher than expected for this pod's recent time-aware pattern."
+            ),
+            "ReadinessProbeFailed": (
+                "The pod is running but its readiness probe is failing, so the workload is not ready to receive traffic."
+            ),
+            "DeploymentUnavailable": (
+                "The deployment does not have the desired number of ready or available replicas."
+            ),
+            "PodNotReady": (
+                "The pod is not Ready according to Kubernetes pod conditions."
+            ),
         }
 
         return root_causes.get(
@@ -452,6 +489,21 @@ class SupervisorAgent:
                 "Verify the target service exists and has ready endpoints.",
                 "Check Service port and targetPort configuration.",
                 "Check application dependency URL/host/port configuration.",
+            ],
+            "PodLSTMResourceAnomaly": [
+                "Inspect the pod workload and recent traffic pattern.",
+                "Check container CPU and memory requests/limits.",
+                "Compare the pod anomaly with Kubernetes events and logs to decide whether it is a primary incident or a separate noisy-neighbor finding.",
+            ],
+            "ReadinessProbeFailed": [
+                "Describe the pod and inspect the readinessProbe path, port, and failure message.",
+                "Check application logs for HTTP errors or missing health endpoint.",
+                "Fix the probe path/port or the application health endpoint, then verify the pod becomes Ready.",
+            ],
+            "DeploymentUnavailable": [
+                "Check deployment rollout status.",
+                "Describe the deployment and its pods.",
+                "Inspect readiness probe failures, pod events, and container logs.",
             ],
         }
 
